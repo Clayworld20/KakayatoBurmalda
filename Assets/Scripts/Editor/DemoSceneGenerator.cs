@@ -426,7 +426,9 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 }
 
                 EditorUtility.DisplayProgressBar("Генерация демо-сцены", "Проверка сцены...", 0.98f);
-                ValidateGeneratedScene(scene, options, forklift, house, barn);
+                // Самопроверка принимает компонент, а не GameObject, поэтому берём ForkliftController
+                // с созданного погрузчика.
+                ValidateGeneratedScene(scene, options, forklift.GetComponent<ForkliftController>(), house, barn);
 
                 EditorSceneManager.MarkSceneDirty(scene);
                 AssetDatabase.SaveAssets();
@@ -1502,6 +1504,17 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             // 4,5 см запаса: корпус в покое «садится» на 2,5 см (днище коллайдера на 0.025 выше нуля),
             // и кромка скоса не должна врезаться в землю.
             const float rampGroundClearance = 0.045f;
+
+            // Нижнее положение вил берём из самого компонента — контроллер остаётся источником правды,
+            // а не строковое имя поля. Демо-значение записываем до расчёта геометрии, чтобы прочитать
+            // из компонента ровно ту высоту, с которой он будет работать в игре.
+            ApplySerializedChanges(forkliftController, serializedObject =>
+            {
+                SetFloat(serializedObject, "forkMinHeight", ForkMinHeight);
+                SetFloat(serializedObject, "startForkHeight", ForkMinHeight);
+            });
+
+            float forkMinHeight = forkliftController != null ? forkliftController.ForkMinHeight : ForkMinHeight;
 
             float rampAngleRadians = rampAngle * Mathf.Deg2Rad;
             float carriageLocalHeight = mastTiltPivot.transform.localPosition.y + forkMinHeight;

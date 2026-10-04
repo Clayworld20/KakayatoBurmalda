@@ -346,6 +346,9 @@ namespace KakayatoBurmalda.Forklift
         /// <summary>Текущая высота вил (локальная Y каретки).</summary>
         public float ForkHeight { get { return currentForkHeight; } }
 
+        /// <summary>Нижнее положение вил в локальных координатах мачты, м (единый источник правды).</summary>
+        public float ForkMinHeight { get { return forkMinHeight; } }
+
         /// <summary>Высота вил в диапазоне 0..1 — удобно для UI.</summary>
         public float ForkHeightNormalized
         {
