@@ -75,11 +75,17 @@ namespace KakayatoBurmalda.Forklift
         [Tooltip("Точка возврата при сбросе погрузчика (клавиша R). Если пусто — позиция на момент старта.")]
         [SerializeField] private Transform resetPoint;
 
-        [Tooltip("Слои, которые считаются «землёй» для проверки заземления.")]
+        [Tooltip("Слои, которые считаются «землёй» для проверки заземления. Оставьте «Everything» — при старте слой Ground будет найден по имени.")]
         [SerializeField] private LayerMask groundLayers = ~0;
 
-        [SerializeField, Min(0.05f), Tooltip("Длина луча проверки заземления, м (луч идёт вниз из GroundCheck).")]
-        private float groundCheckDistance = 0.4f;
+        [SerializeField, Min(0.05f), Tooltip("Длина проверки заземления, м (сфера идёт вниз из GroundCheck).")]
+        private float groundCheckDistance = 0.75f;
+
+        [SerializeField, Min(0.01f), Tooltip("Радиус сферы проверки заземления, м.")]
+        private float groundCheckRadius = 0.22f;
+
+        [SerializeField, Tooltip("Если маска = «Everything», попробовать найти слой Ground по имени, чтобы никогда не цеплять корпус и кубики.")]
+        private bool autoResolveGroundLayer = true;
 
         [Tooltip("Слои, на которых ищутся кубики при удержании на вилах.")]
         [SerializeField] private LayerMask cubeLayers = ~0;
@@ -91,33 +97,43 @@ namespace KakayatoBurmalda.Forklift
 
         #region Настройки движения
 
-        [Header("Движение")]
-        [SerializeField, Tooltip("Максимальная скорость вперёд, м/с.")]
-        private float maxForwardSpeed = 5.5f;
+        [Header("Движение (силы в ньютонах, штатная масса погрузчика 900 кг)")]
+        [SerializeField, Min(0f), Tooltip("Сила тяги вперёд, Н. 16 000 Н даёт ≈17 м/с² для 900 кг — уверенно срывает машину с места.")]
+        private float forwardMotorForce = 16000f;
 
-        [SerializeField, Tooltip("Максимальная скорость назад, м/с.")]
-        private float maxReverseSpeed = 3f;
+        [SerializeField, Min(0f), Tooltip("Сила тяги назад, Н.")]
+        private float reverseMotorForce = 10000f;
 
-        [SerializeField, Tooltip("Ускорение вперёд, м/с².")]
-        private float driveAcceleration = 7f;
+        [SerializeField, Min(0f), Tooltip("Максимальная скорость вперёд, м/с.")]
+        private float maxForwardSpeed = 7f;
 
-        [SerializeField, Tooltip("Ускорение назад, м/с².")]
-        private float reverseAcceleration = 5f;
+        [SerializeField, Min(0f), Tooltip("Максимальная скорость назад, м/с.")]
+        private float maxReverseSpeed = 3.5f;
 
-        [SerializeField, Tooltip("Торможение двигателем при отпущенном газе, м/с².")]
-        private float brakeAcceleration = 4f;
+        [SerializeField, Min(0f), Tooltip("Сила торможения двигателем при отпущенном газе, Н.")]
+        private float brakeForce = 8000f;
 
-        [SerializeField, Tooltip("Торможение ручником (Space), м/с².")]
-        private float handbrakeAcceleration = 18f;
+        [SerializeField, Min(0f), Tooltip("Сила ручного тормоза (Space), Н.")]
+        private float handbrakeForce = 24000f;
 
-        [SerializeField, Range(0f, 0.5f), Tooltip("Мёртвая зона стика/оси газа.")]
-        private float throttleDeadZone = 0.05f;
+        [SerializeField, Range(0f, 1f), Tooltip("Доля тяги в воздухе (0 — полёт без управления, 1 — полный контроль). " +
+                                                 "Ненулевое значение гарантирует, что погрузчик поедет, даже если проверка заземления дала сбой.")]
+        private float airControl = 0.25f;
+
+        [SerializeField, Min(0.05f), Tooltip("Скорость отклика мотора, 1/с (плавность нажатия и сброса газа).")]
+        private float motorResponse = 6f;
+
+        [SerializeField, Range(0f, 0.5f), Tooltip("Мёртвая зона газа и руля (0 — без мёртвой зоны).")]
+        private float throttleDeadZone = 0.02f;
 
         [SerializeField, Tooltip("Автоматически ограничивать угловую скорость корпуса, чтобы погрузчик не «юзал».")]
         private bool limitBodyPitchAndRoll = true;
 
         [SerializeField, Min(0f), Tooltip("Предел скорости кувыркания корпуса (тангаж/крен), град/с.")]
         private float maxTumbleRate = 120f;
+
+        [SerializeField, Tooltip("Следить за «залипанием»: если газ нажат, а машина не движется — один раз объяснить причину в консоли.")]
+        private bool logMovementDiagnostics = true;
 
         #endregion
 
@@ -302,8 +318,11 @@ namespace KakayatoBurmalda.Forklift
         private float targetMastTilt;
         private float currentYawRate;
         private float currentVisualSteerAngle;
+        private float currentMotor;
         private int carriedCubesInVolume;
         private bool resetRequested;
+        private float stalledTime;
+        private bool stallWarningLogged;
 
         private Vector3 startPosition;
         private Quaternion startRotation;
@@ -343,6 +362,15 @@ namespace KakayatoBurmalda.Forklift
         /// <summary>Текущий вход руля (после смешивания клавиатуры и внешнего ввода).</summary>
         public float SteerInput { get { return steerInput; } }
 
+        /// <summary>Текущая отдача мотора (-1..1) — сглаженное значение газа, которое реально идёт в физику.</summary>
+        public float CurrentMotor { get { return currentMotor; } }
+
+        /// <summary>Нормаль поверхности под погрузчиком (Vector3.up, если опоры нет).</summary>
+        public Vector3 GroundNormal { get; private set; }
+
+        /// <summary>Рабочая маска слоёв земли (после автоопределения слоя Ground).</summary>
+        public LayerMask GroundLayers { get { return groundLayers; } }
+
         /// <summary>Rigidbody корпуса (кэш).</summary>
         public Rigidbody Body { get { return body; } }
 
@@ -357,6 +385,37 @@ namespace KakayatoBurmalda.Forklift
         {
             body = GetComponent<Rigidbody>();
             body.interpolation = interpolation;
+
+            // Стартовое состояние ввода — строго нулевое: ручник выключен, газ/руль/вилы в покое.
+            throttleInput = 0f;
+            steerInput = 0f;
+            liftInput = 0f;
+            tiltInput = 0f;
+            handbrakeInput = false;
+            currentMotor = 0f;
+            externalThrottle = 0f;
+            externalSteer = 0f;
+            externalLift = 0f;
+            externalTilt = 0f;
+            externalHandbrake = false;
+            stalledTime = 0f;
+            stallWarningLogged = false;
+
+            GroundNormal = Vector3.up;
+            ResolveGroundLayers();
+
+            if (IsLayerInMask(gameObject.layer, groundLayers) && groundCheck == null)
+            {
+                // Если Ground Check не назначен, луч идёт из центра корпуса и маска земли,
+                // включающая слой самого погрузчика, может давать ложные срабатывания.
+                Debug.LogWarning("[ForkliftController] Маска земли включает слой самого погрузчика, а Ground Check не назначен. " +
+                                 "Проверка заземления игнорирует собственные коллайдеры, но лучше назначить Ground Check под днищем.", this);
+            }
+
+            if (body.mass < 1f)
+            {
+                Debug.LogWarning("[ForkliftController] Масса Rigidbody меньше 1 кг — тяга рассчитана на тяжёлую технику (900 кг).", this);
+            }
 
             if (overrideCenterOfMass)
             {
@@ -422,6 +481,7 @@ namespace KakayatoBurmalda.Forklift
             ApplyStabilization();
             LimitTumbling();
             UpdateWheelVisuals(deltaTime);
+            UpdateMovementDiagnostics(deltaTime);
         }
 
         private void OnDisable()
@@ -597,31 +657,99 @@ namespace KakayatoBurmalda.Forklift
 
         private void UpdateGroundedState()
         {
-            // Луч вниз из GroundCheck. Перебираем все попадания и игнорируем коллайдеры
-            // собственного погрузчика (вилы, планка каретки и т.п.), чтобы они не «держали» его в воздухе.
-            Vector3 origin = groundCheck != null ? groundCheck.position : transform.position;
+            // Сфера вниз из GroundCheck. Маска слоёв отсекает всё лишнее ещё на уровне физики,
+            // а фильтр по иерархии/rigidbody выбрасывает коллайдеры самого погрузчика (вилы, каретка,
+            // корпус) и кубики, даже если они случайно попали в маску.
+            Vector3 origin = groundCheck != null ? groundCheck.position : transform.position + Vector3.up * 0.25f;
+            float radius = Mathf.Max(0.01f, groundCheckRadius);
+            float distance = Mathf.Max(0.05f, groundCheckDistance);
 
-            int hitCount = Physics.RaycastNonAlloc(
-                origin,
+            // Начинаем сферу чуть выше точки проверки, чтобы она не «застревала» внутри пола.
+            Vector3 castOrigin = origin + Vector3.up * radius * 0.5f;
+
+            int hitCount = Physics.SphereCastNonAlloc(
+                castOrigin,
+                radius,
                 Vector3.down,
                 groundHitsBuffer,
-                groundCheckDistance,
+                distance + radius * 0.5f,
                 groundLayers,
                 QueryTriggerInteraction.Ignore);
 
             IsGrounded = false;
+            GroundNormal = Vector3.up;
 
             for (int i = 0; i < hitCount; i++)
             {
                 Collider hitCollider = groundHitsBuffer[i].collider;
-                if (hitCollider == null || hitCollider.transform.IsChildOf(transform))
+                if (hitCollider == null)
+                {
+                    continue;
+                }
+
+                // Свой корпус, мачта, каретка, вилы — не земля.
+                if (hitCollider.transform.IsChildOf(transform))
+                {
+                    continue;
+                }
+
+                Rigidbody hitBody = hitCollider.attachedRigidbody;
+                if (hitBody == body || (hitBody != null && hitBody.transform.IsChildOf(transform)))
+                {
+                    continue;
+                }
+
+                // Кубики — это груз, а не опора.
+                if (hitCollider.GetComponentInParent<CubeProperty>() != null)
                 {
                     continue;
                 }
 
                 IsGrounded = true;
+                GroundNormal = groundHitsBuffer[i].normal;
+
+                // Отбрасываем заведомо «боковые» контакты (например, стена амбара рядом с вилами).
+                if (GroundNormal.y < 0.1f)
+                {
+                    IsGrounded = false;
+                }
+
                 break;
             }
+        }
+
+        /// <summary>
+        /// Определить рабочую маску земли. Если пользователь оставил «Everything»,
+        /// пробуем найти слой Ground по имени — тогда проверка гарантированно не цепляет
+        /// собственный корпус и кубики.
+        /// </summary>
+        private void ResolveGroundLayers()
+        {
+            if (!autoResolveGroundLayer)
+            {
+                return;
+            }
+
+            if (groundLayers.value != ~0)
+            {
+                return;
+            }
+
+            int groundLayerIndex = LayerMask.NameToLayer("Ground");
+            if (groundLayerIndex < 0)
+            {
+                return;
+            }
+
+            groundLayers = 1 << groundLayerIndex;
+            Debug.Log(string.Format(
+                "[ForkliftController] Маска земли не задана — использую слой «Ground» (индекс {0}).",
+                groundLayerIndex), this);
+        }
+
+        private static bool IsLayerInMask(int layer, LayerMask mask)
+        {
+            return (mask.value & (1 << layer)) != 0;
         }
 
         /// <summary>
@@ -767,64 +895,148 @@ namespace KakayatoBurmalda.Forklift
         {
             ForwardSpeed = Vector3.Dot(GetFlatVelocity(), transform.forward);
 
-            if (!IsGrounded)
-            {
-                return;
-            }
+            // Тяга есть всегда: на земле — полная, в воздухе — доля airControl.
+            // Именно поэтому погрузчик поедет даже при сбое проверки заземления.
+            float traction = IsGrounded ? 1f : Mathf.Clamp01(airControl);
 
-            if (Mathf.Abs(throttleInput) > 0.001f)
-            {
-                float maxSpeed = throttleInput > 0f ? maxForwardSpeed : maxReverseSpeed;
-                bool speedLimitReached = throttleInput > 0f ? ForwardSpeed >= maxSpeed : ForwardSpeed <= -maxSpeed;
+            // Плавный отклик мотора (без рывка при мгновенном нажатии клавиши).
+            currentMotor = Mathf.MoveTowards(currentMotor, throttleInput, motorResponse * deltaTime);
 
-                if (!speedLimitReached)
+            if (Mathf.Abs(currentMotor) > 0.001f)
+            {
+                bool drivingForward = currentMotor >= 0f;
+                float motorForce = drivingForward ? forwardMotorForce : reverseMotorForce;
+                float maxSpeed = drivingForward ? maxForwardSpeed : maxReverseSpeed;
+
+                // Гасим тягу по мере набора скорости — плавный выход на «крейсер».
+                float speedFactor = Mathf.Clamp01(1f - Mathf.Abs(ForwardSpeed) / Mathf.Max(0.5f, maxSpeed));
+
+                // Если машина катится в обратную сторону, сначала гасим инерцию — тягу не режем.
+                if (Mathf.Abs(ForwardSpeed) > 0.5f && Mathf.Sign(ForwardSpeed) != Mathf.Sign(currentMotor))
                 {
-                    float acceleration = throttleInput > 0f ? driveAcceleration : reverseAcceleration;
-
-                    // Чем ближе к максимальной скорости, тем слабее тяга — плавный выход на «крейсер».
-                    float speedFactor = 1f - Mathf.Clamp01(Mathf.Abs(ForwardSpeed) / maxSpeed);
-                    speedFactor = Mathf.Max(speedFactor, 0.15f);
-
-                    body.AddForce(transform.forward * (throttleInput * acceleration * speedFactor), ForceMode.Acceleration);
+                    speedFactor = 1f;
                 }
+
+                // AddRelativeForce прикладывает силу вдоль ЛОКАЛЬНОЙ оси forward корпуса —
+                // направление всегда совпадает с «носом» погрузчика, независимо от его поворота.
+                Vector3 localDirection = Vector3.forward * Mathf.Sign(currentMotor);
+                float appliedForce = motorForce * Mathf.Abs(currentMotor) * speedFactor * traction;
+
+                body.AddRelativeForce(localDirection * appliedForce, ForceMode.Force);
             }
             else
             {
-                ApplyBrake(brakeAcceleration, deltaTime);
+                ApplyBrake(brakeForce, deltaTime, traction);
             }
 
             if (handbrakeInput)
             {
-                ApplyBrake(handbrakeAcceleration, deltaTime);
+                ApplyBrake(handbrakeForce, deltaTime, traction);
             }
         }
 
-        /// <summary>Гасим продольную скорость: сила подбирается так, чтобы за шаг физики скорость не «перелетела» через ноль.</summary>
-        private void ApplyBrake(float deceleration, float deltaTime)
+        /// <summary>
+        /// Торможение силой (Н). Сила ограничивается так, чтобы за один шаг физики скорость
+        /// не «перелетела» через ноль и машина не дёргалась назад.
+        /// </summary>
+        private void ApplyBrake(float brakeNewtons, float deltaTime, float traction)
         {
             float forwardSpeed = Vector3.Dot(GetFlatVelocity(), transform.forward);
-            if (Mathf.Abs(forwardSpeed) < 0.01f)
+            if (Mathf.Abs(forwardSpeed) < 0.02f)
             {
                 return;
             }
 
-            float brake = Mathf.Min(Mathf.Abs(forwardSpeed) / Mathf.Max(deltaTime, 0.0001f), deceleration);
-            body.AddForce(-transform.forward * (Mathf.Sign(forwardSpeed) * brake), ForceMode.Acceleration);
+            float maxUsefulForce = Mathf.Abs(forwardSpeed) * Mathf.Max(1f, body.mass) / Mathf.Max(deltaTime, 0.0001f);
+            float appliedForce = Mathf.Min(brakeNewtons * traction, maxUsefulForce);
+
+            body.AddRelativeForce(Vector3.forward * (-Mathf.Sign(forwardSpeed) * appliedForce), ForceMode.Force);
+        }
+
+        /// <summary>
+        /// Диагностика «газ нажат, а машина стоит»: один раз объясняем в консоли, что проверить.
+        /// Помогает не гадать, почему погрузчик не едет на новом проекте.
+        /// </summary>
+        private void UpdateMovementDiagnostics(float deltaTime)
+        {
+            if (!logMovementDiagnostics || stallWarningLogged)
+            {
+                return;
+            }
+
+            bool tryingToMove = Mathf.Abs(throttleInput) > 0.5f && !handbrakeInput;
+
+            if (!tryingToMove || Mathf.Abs(ForwardSpeed) > 0.05f)
+            {
+                stalledTime = 0f;
+                return;
+            }
+
+            stalledTime += deltaTime;
+            if (stalledTime < 1f)
+            {
+                return;
+            }
+
+            stallWarningLogged = true;
+
+#if ENABLE_LEGACY_INPUT_MANAGER
+            const string inputState = "старый Input Manager доступен";
+#else
+            const string inputState = "старый Input Manager ВЫКЛЮЧЕН (Project Settings → Player → Active Input Handling = Input System Package) — " +
+                                      "клавиатура не читается, подайте ввод через SetInput() или включите Both";
+#endif
+
+            Debug.LogWarning(string.Format(
+                "[ForkliftController] Газ нажат, но погрузчик не движется. Состояние: заземлён = {0}, ручник = {1}, " +
+                "масса = {2:F0} кг, тяга вперёд = {3:F0} Н, маска земли = {4}, отдача мотора = {5:F2}, скорость = {6:F2} м/с. " +
+                "Причины по частоте: {7}; слишком высокое трение коллайдера корпуса о пол (нужен низкофрикционный PhysicMaterial); " +
+                "погрузчик упёрся в препятствие.",
+                IsGrounded,
+                handbrakeInput,
+                body.mass,
+                forwardMotorForce,
+                groundLayers.value,
+                currentMotor,
+                ForwardSpeed,
+                inputState),
+                this);
+        }
+
+        /// <summary>Ручная диагностика из контекстного меню компонента (правая кнопка мыши в инспекторе).</summary>
+        [ContextMenu("Диагностика движения (в консоль)")]
+        private void LogMovementDiagnosticsNow()
+        {
+            Debug.Log(string.Format(
+                "[ForkliftController:{0}] заземлён={1} (нормаль {2}), маска земли={3} (Ground = {4}), ручник={5}, газ={6:F2}, " +
+                "руль={7:F2}, мотор={8:F2}, скорость вперёд={9:F2} м/с, масса={10:F0} кг, тяга={11:F0}/{12:F0} Н, " +
+                "вилы={13:F2} м, FPS-физика={14:F0} Гц, кубиков на вилах={15}.",
+                name,
+                IsGrounded,
+                GroundNormal,
+                groundLayers.value,
+                LayerMask.NameToLayer("Ground"),
+                handbrakeInput,
+                throttleInput,
+                steerInput,
+                currentMotor,
+                ForwardSpeed,
+                body != null ? body.mass : 0f,
+                forwardMotorForce,
+                reverseMotorForce,
+                currentForkHeight,
+                1f / Mathf.Max(0.0001f, Time.fixedDeltaTime),
+                carriedCubesInVolume),
+                this);
         }
 
         private void ApplySteering(float deltaTime)
         {
             float forwardSpeed = Vector3.Dot(GetFlatVelocity(), transform.forward);
-
-            if (!IsGrounded)
-            {
-                currentYawRate = Mathf.MoveTowards(currentYawRate, 0f, turnAcceleration * deltaTime);
-                currentVisualSteerAngle = Mathf.MoveTowards(currentVisualSteerAngle, 0f, maxVisualSteerAngle * 4f * deltaTime);
-                return;
-            }
+            float traction = IsGrounded ? 1f : Mathf.Clamp01(airControl);
 
             float speedFactor = Mathf.Clamp01(Mathf.Abs(forwardSpeed) / Mathf.Max(0.01f, turnSpeedReference));
-            float authority = Mathf.Lerp(turnAuthorityAtStandstill, 1f, speedFactor);
+            float authority = Mathf.Lerp(turnAuthorityAtStandstill, 1f, speedFactor) * traction;
 
             // Задним ходом машина рулит «в обратную сторону» — как настоящий автомобиль.
             float direction = 1f;
