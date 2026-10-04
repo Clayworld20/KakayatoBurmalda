@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEngine;
 
 namespace KakayatoBurmalda.Forklift
@@ -281,6 +281,7 @@ namespace KakayatoBurmalda.Forklift
 
         private Rigidbody body;
         private Collider[] overlapBuffer = new Collider[16];
+        private readonly RaycastHit[] groundHitsBuffer = new RaycastHit[8];
         private readonly List<CubeProperty> carriedCubes = new List<CubeProperty>();
 
         private float throttleInput;
@@ -596,18 +597,30 @@ namespace KakayatoBurmalda.Forklift
 
         private void UpdateGroundedState()
         {
-            // Луч вниз: физика не находит коллайдер, изнутри которого начат луч, поэтому
-            // собственный корпус погрузчика результату не мешает.
+            // Луч вниз из GroundCheck. Перебираем все попадания и игнорируем коллайдеры
+            // собственного погрузчика (вилы, планка каретки и т.п.), чтобы они не «держали» его в воздухе.
             Vector3 origin = groundCheck != null ? groundCheck.position : transform.position;
 
-            RaycastHit hit;
-            if (Physics.Raycast(origin, Vector3.down, out hit, groundCheckDistance, groundLayers, QueryTriggerInteraction.Ignore))
+            int hitCount = Physics.RaycastNonAlloc(
+                origin,
+                Vector3.down,
+                groundHitsBuffer,
+                groundCheckDistance,
+                groundLayers,
+                QueryTriggerInteraction.Ignore);
+
+            IsGrounded = false;
+
+            for (int i = 0; i < hitCount; i++)
             {
-                IsGrounded = !hit.collider.transform.IsChildOf(transform);
-            }
-            else
-            {
-                IsGrounded = false;
+                Collider hitCollider = groundHitsBuffer[i].collider;
+                if (hitCollider == null || hitCollider.transform.IsChildOf(transform))
+                {
+                    continue;
+                }
+
+                IsGrounded = true;
+                break;
             }
         }
 
