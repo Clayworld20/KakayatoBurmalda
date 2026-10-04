@@ -5,14 +5,14 @@ using UnityEngine;
 namespace KakayatoBurmalda.Forklift
 {
     /// <summary>
-    /// Менеджер игры: считает правильно отсортированные кубики, очки и ошибки,
-    /// ведёт реестр активных кубиков и сообщает о конце уровня.
+    /// Менеджер игры: считает правильно отсортированные паллеты с грузом, очки и ошибки,
+    /// ведёт реестр активных паллет и сообщает о конце уровня.
     ///
     /// Все данные доступны через инспектор (для отладки) и через события (для UI/звука):
     ///   OnScoreChanged    — изменился счёт (новое значение, дельта)
-    ///   OnCubeSorted      — кубик правильно отсортирован (кубик, зона, начислено)
-    ///   OnCubeMisplaced   — кубик принесён в неправильную зону (кубик, зона, штраф)
-    ///   OnLevelCompleted  — все зарегистрированные кубики отсортированы
+    ///   OnPalletSorted      — груз правильно отсортирован (паллета, зона, начислено)
+    ///   OnPalletMisplaced   — груз привезён в неправильную зону (паллета, зона, штраф)
+    ///   OnLevelCompleted  — все зарегистрированные паллеты отсортированы
     ///
     /// Скрипт ставится на пустышку «GameManager» (или на любой объект сцены) — ровно один на сцену.
     /// </summary>
@@ -28,14 +28,14 @@ namespace KakayatoBurmalda.Forklift
         [SerializeField, Tooltip("Стартовое значение счёта.")]
         private int startingScore = 0;
 
-        [SerializeField, Tooltip("Выводить в консоль итог после каждого засчитанного кубика.")]
+        [SerializeField, Tooltip("Выводить в консоль итог после каждой засчитанной паллеты.")]
         private bool logEverySort = true;
 
         [SerializeField, Tooltip("Выводить в консоль сводку по завершении уровня.")]
         private bool logSummary = true;
 
-        private readonly HashSet<CubeProperty> activeCubes = new HashSet<CubeProperty>();
-        private readonly HashSet<CubeProperty> sortedCubes = new HashSet<CubeProperty>();
+        private readonly HashSet<CargoPallet> activePallets = new HashSet<CargoPallet>();
+        private readonly HashSet<CargoPallet> sortedPallets = new HashSet<CargoPallet>();
 
         private float sessionStartTime;
         private bool isLevelCompleted;
@@ -87,24 +87,24 @@ namespace KakayatoBurmalda.Forklift
         /// <summary>Текущий счёт.</summary>
         public int Score { get; private set; }
 
-        /// <summary>Сколько кубиков правильно отсортировано (целевой счётчик из ТЗ).</summary>
-        public int SortedCubesCount { get { return sortedCubes.Count; } }
+        /// <summary>Сколько паллет правильно отсортировано (целевой счётчик из ТЗ).</summary>
+        public int SortedPalletsCount { get { return sortedPallets.Count; } }
 
-        /// <summary>Сколько кубиков попало не в свою зону.</summary>
-        public int MisplacedCubesCount { get; private set; }
+        /// <summary>Сколько паллет попало не в свою зону.</summary>
+        public int MisplacedCargoCount { get; private set; }
 
-        /// <summary>Сколько кубиков сейчас на сцене и зарегистрировано в менеджере.</summary>
-        public int ActiveCubesCount { get { return activeCubes.Count; } }
+        /// <summary>Сколько паллет сейчас на сцене и зарегистрировано в менеджере.</summary>
+        public int ActivePalletsCount { get { return activePallets.Count; } }
 
-        /// <summary>Сколько кубиков было зарегистрировано за сессию (включая отсортированные).</summary>
-        public int TotalCubesSeen { get; private set; }
+        /// <summary>Сколько паллет было зарегистрировано за сессию (включая отсортированные).</summary>
+        public int TotalPalletsSeen { get; private set; }
 
-        /// <summary>Сколько кубиков осталось отсортировать.</summary>
-        public int RemainingCubesCount
+        /// <summary>Сколько паллет осталось отсортировать.</summary>
+        public int RemainingPalletsCount
         {
             get
             {
-                int remaining = TotalCubesSeen - SortedCubesCount;
+                int remaining = TotalPalletsSeen - SortedPalletsCount;
                 return remaining > 0 ? remaining : 0;
             }
         }
@@ -112,7 +112,7 @@ namespace KakayatoBurmalda.Forklift
         /// <summary>Сколько секунд длится сессия.</summary>
         public float ElapsedSeconds { get { return Time.time - sessionStartTime; } }
 
-        /// <summary>Все зарегистрированные кубики отсортированы, и кубики вообще есть.</summary>
+        /// <summary>Все зарегистрированные паллеты отсортированы, и паллеты вообще есть.</summary>
         public bool IsLevelCompleted { get { return isLevelCompleted; } }
 
         #endregion
@@ -122,50 +122,50 @@ namespace KakayatoBurmalda.Forklift
         /// <summary>Счёт изменился. Аргументы: новое значение счёта, дельта.</summary>
         public event Action<int, int> OnScoreChanged;
 
-        /// <summary>Кубик правильно отсортирован. Аргументы: кубик, зона, начисленные очки.</summary>
-        public event Action<CubeProperty, SortingZone, int> OnCubeSorted;
+        /// <summary>Груз правильно отсортирован. Аргументы: паллета, зона, начисленные очки.</summary>
+        public event Action<CargoPallet, SortingZone, int> OnPalletSorted;
 
-        /// <summary>Кубик принесён в неправильную зону. Аргументы: кубик, зона, снятые очки.</summary>
-        public event Action<CubeProperty, SortingZone, int> OnCubeMisplaced;
+        /// <summary>Груз привезён в неправильную зону. Аргументы: паллета, зона, снятые очки.</summary>
+        public event Action<CargoPallet, SortingZone, int> OnPalletMisplaced;
 
-        /// <summary>Уровень завершён: все кубики разложены по своим зонам.</summary>
+        /// <summary>Уровень завершён: весь груз разложен по своим зонам.</summary>
         public event Action OnLevelCompleted;
 
         #endregion
 
-        #region Реестр кубиков
+        #region Реестр паллет
 
-        /// <summary>Вызывается из <see cref="CubeProperty"/> при появлении кубика на сцене.</summary>
-        public void RegisterCube(CubeProperty cube)
+        /// <summary>Вызывается из <see cref="CargoPallet"/> при появлении паллеты на сцене.</summary>
+        public void RegisterPallet(CargoPallet pallet)
         {
-            if (cube == null || activeCubes.Contains(cube))
+            if (pallet == null || activePallets.Contains(pallet))
             {
                 return;
             }
 
-            activeCubes.Add(cube);
-            TotalCubesSeen++;
+            activePallets.Add(pallet);
+            TotalPalletsSeen++;
 
-            // Если все кубики уже разложены, а в игру добавили новый — уровень снова активен.
-            if (isLevelCompleted && !cube.IsSorted)
+            // Если весь груз уже разложен, а в игру добавили новую паллету — уровень снова активен.
+            if (isLevelCompleted && !pallet.IsSorted)
             {
                 isLevelCompleted = false;
             }
         }
 
-        /// <summary>Вызывается из <see cref="CubeProperty"/> при удалении/выключении кубика.</summary>
-        public void UnregisterCube(CubeProperty cube)
+        /// <summary>Вызывается из <see cref="CargoPallet"/> при удалении/выключении паллеты.</summary>
+        public void UnregisterPallet(CargoPallet pallet)
         {
-            if (cube == null)
+            if (pallet == null)
             {
                 return;
             }
 
-            activeCubes.Remove(cube);
+            activePallets.Remove(pallet);
         }
 
-        /// <summary>Снимок зарегистрированных кубиков (без создания мусора, если передать свой список).</summary>
-        public void GetActiveCubes(List<CubeProperty> results)
+        /// <summary>Снимок зарегистрированных паллет (без создания мусора, если передать свой список).</summary>
+        public void GetActivePallets(List<CargoPallet> results)
         {
             if (results == null)
             {
@@ -173,7 +173,7 @@ namespace KakayatoBurmalda.Forklift
             }
 
             results.Clear();
-            results.AddRange(activeCubes);
+            results.AddRange(activePallets);
         }
 
         #endregion
@@ -181,18 +181,18 @@ namespace KakayatoBurmalda.Forklift
         #region Учёт результатов
 
         /// <summary>
-        /// Кубик попал в правильную зону: +очки, +счётчик, лог в консоль.
-        /// Вызывается из <see cref="SortingZone.AcceptCube"/>.
+        /// Паллета попала в правильную зону: +очки, +счётчик, лог в консоль.
+        /// Вызывается из <see cref="SortingZone.AcceptPallet"/>.
         /// </summary>
-        public void ReportCubeSorted(CubeProperty cube, SortingZone zone, int score)
+        public void ReportPalletSorted(CargoPallet pallet, SortingZone zone, int score)
         {
-            if (cube == null)
+            if (pallet == null)
             {
                 return;
             }
 
-            bool alreadyCounted = sortedCubes.Contains(cube);
-            sortedCubes.Add(cube);
+            bool alreadyCounted = sortedPallets.Contains(pallet);
+            sortedPallets.Add(pallet);
 
             if (!alreadyCounted)
             {
@@ -200,22 +200,22 @@ namespace KakayatoBurmalda.Forklift
             }
 
             string zoneName = zone != null ? zone.name : "неизвестная зона";
-            string cubeName = cube.name;
+            string palletName = pallet.name;
 
             Debug.Log(string.Format(
-                "[GameManager] Кубик «{0}» ({1}) правильно отсортирован в зоне «{2}». +{3} очков. Отсортировано: {4} из {5}. Осталось: {6}.",
-                cubeName,
-                cube.CubeType,
+                "[GameManager] Паллета «{0}» с грузом {1} правильно отсортирована в зоне «{2}». +{3} очков. Отсортировано: {4} из {5}. Осталось: {6}.",
+                palletName,
+                pallet.Cargo,
                 zoneName,
                 score,
-                SortedCubesCount,
-                TotalCubesSeen,
-                RemainingCubesCount),
-                cube);
+                SortedPalletsCount,
+                TotalPalletsSeen,
+                RemainingPalletsCount),
+                pallet);
 
-            if (OnCubeSorted != null)
+            if (OnPalletSorted != null)
             {
-                OnCubeSorted(cube, zone, score);
+                OnPalletSorted(pallet, zone, score);
             }
 
             if (logEverySort)
@@ -227,12 +227,12 @@ namespace KakayatoBurmalda.Forklift
         }
 
         /// <summary>
-        /// Кубик попал в чужую зону: списываем штраф (если он больше нуля) и записываем ошибку.
-        /// Вызывается из <see cref="SortingZone.RejectCube"/>.
+        /// Паллета попала в чужую зону: списываем штраф (если он больше нуля) и записываем ошибку.
+        /// Вызывается из <see cref="SortingZone.RejectPallet"/>.
         /// </summary>
-        public void ReportCubeMisplaced(CubeProperty cube, SortingZone zone, int penalty)
+        public void ReportPalletMisplaced(CargoPallet pallet, SortingZone zone, int penalty)
         {
-            MisplacedCubesCount++;
+            MisplacedCargoCount++;
 
             if (penalty > 0)
             {
@@ -243,17 +243,17 @@ namespace KakayatoBurmalda.Forklift
             string expected = zone != null ? zone.TargetType.ToString() : "?";
 
             Debug.LogWarning(string.Format(
-                "[GameManager] Кубик «{0}» типа {1} положен в зону «{2}», которая принимает {3}. Ошибок: {4}.",
-                cube != null ? cube.name : "null",
-                cube != null ? cube.CubeType.ToString() : "Unknown",
+                "[GameManager] Паллета «{0}» с грузом {1} привезена в зону «{2}», которая принимает {3}. Ошибок: {4}.",
+                pallet != null ? pallet.name : "null",
+                pallet != null ? pallet.Cargo.ToString() : "Unknown",
                 zoneName,
                 expected,
-                MisplacedCubesCount),
-                cube);
+                MisplacedCargoCount),
+                pallet);
 
-            if (OnCubeMisplaced != null)
+            if (OnPalletMisplaced != null)
             {
-                OnCubeMisplaced(cube, zone, penalty);
+                OnPalletMisplaced(pallet, zone, penalty);
             }
         }
 
@@ -275,13 +275,13 @@ namespace KakayatoBurmalda.Forklift
             }
         }
 
-        /// <summary>Сбросить счёт и счётчики (не трогая зарегистрированные кубики).</summary>
+        /// <summary>Сбросить счёт и счётчики (не трогая зарегистрированные паллеты).</summary>
         public void ResetScore()
         {
             int previousScore = Score;
             Score = Mathf.Max(0, startingScore);
-            sortedCubes.Clear();
-            MisplacedCubesCount = 0;
+            sortedPallets.Clear();
+            MisplacedCargoCount = 0;
             isLevelCompleted = false;
             sessionStartTime = Time.time;
 
@@ -293,12 +293,12 @@ namespace KakayatoBurmalda.Forklift
             Debug.Log(string.Format("[GameManager] Счёт сброшен. Очки: {0}, отсортировано: 0.", Score));
         }
 
-        /// <summary>Полный сброс сессии: счёт, счётчики и реестр кубиков.</summary>
+        /// <summary>Полный сброс сессии: счёт, счётчики и реестр паллет.</summary>
         public void ResetSession()
         {
-            activeCubes.Clear();
+            activePallets.Clear();
             ResetScore();
-            TotalCubesSeen = 0;
+            TotalPalletsSeen = 0;
 
             Debug.Log("[GameManager] Сессия начата.");
         }
@@ -309,7 +309,7 @@ namespace KakayatoBurmalda.Forklift
 
         private void CheckLevelCompletion()
         {
-            if (isLevelCompleted || TotalCubesSeen <= 0 || SortedCubesCount < TotalCubesSeen)
+            if (isLevelCompleted || TotalPalletsSeen <= 0 || SortedPalletsCount < TotalPalletsSeen)
             {
                 return;
             }
@@ -320,9 +320,9 @@ namespace KakayatoBurmalda.Forklift
             {
                 LogState();
                 Debug.Log(string.Format(
-                    "[GameManager] УРОВЕНЬ ПРОЙДЕН! Кубиков отсортировано: {0}. Ошибок: {1}. Итоговый счёт: {2}. Время: {3:F1} с.",
-                    SortedCubesCount,
-                    MisplacedCubesCount,
+                    "[GameManager] УРОВЕНЬ ПРОЙДЕН! Паллет отсортировано: {0}. Ошибок: {1}. Итоговый счёт: {2}. Время: {3:F1} с.",
+                    SortedPalletsCount,
+                    MisplacedCargoCount,
                     Score,
                     ElapsedSeconds));
             }
@@ -337,13 +337,13 @@ namespace KakayatoBurmalda.Forklift
         public void LogState()
         {
             Debug.Log(string.Format(
-                "[GameManager] Очки: {0} | Отсортировано: {1}/{2} | Осталось: {3} | Ошибок: {4} | Кубиков на сцене: {5} | Время: {6:F1} с.",
+                "[GameManager] Очки: {0} | Отсортировано: {1}/{2} | Осталось: {3} | Ошибок: {4} | Паллет на сцене: {5} | Время: {6:F1} с.",
                 Score,
-                SortedCubesCount,
-                TotalCubesSeen,
-                RemainingCubesCount,
-                MisplacedCubesCount,
-                ActiveCubesCount,
+                SortedPalletsCount,
+                TotalPalletsSeen,
+                RemainingPalletsCount,
+                MisplacedCargoCount,
+                ActivePalletsCount,
                 ElapsedSeconds));
         }
 

@@ -5,66 +5,67 @@ namespace KakayatoBurmalda.Forklift
 {
     /// <summary>
     /// Зона сортировки. Вешается на объект с коллайдером и галочкой IsTrigger.
-    /// Хранит целевой тип кубика: если в зону попадает кубик с <see cref="CubeProperty"/>
-    /// того же типа — кубик засчитывается (очки + Debug.Log + уничтожение/отключение физики),
-    /// кубик чужого типа — отклоняется (штраф опционально, событие всегда).
+    /// Хранит целевой тип груза (<see cref="CargoType"/>): если в зону попадает паллета
+    /// с <see cref="CargoPallet"/> того же типа — груз засчитывается (очки + Debug.Log +
+    /// уничтожение/отключение физики), груз чужого типа — отклоняется (штраф опционально,
+    /// событие всегда).
     ///
     /// Раскладка объектов в сцене:
-    ///   SortingZone_Red (BoxCollider, IsTrigger = true, SortingZone, материал зоны)
-    ///   SortingZone_Green, SortingZone_Blue ...
+    ///   SortingZone_Boxes (BoxCollider, IsTrigger = true, SortingZone, подсветка зоны)
+    ///   SortingZone_Barrels, SortingZone_Construction
     /// </summary>
     [AddComponentMenu("Kakayato/Sorting Zone")]
     public class SortingZone : MonoBehaviour
     {
-        [Header("Целевой тип")]
-        [SerializeField, Tooltip("Какой тип кубика принимает зона. None — зона отключена и ничего не принимает.")]
-        private CubeColor targetType = CubeColor.Red;
+        [Header("Целевой груз")]
+        [SerializeField, Tooltip("Какой тип груза принимает зона. None — зона отключена и ничего не принимает.")]
+        private CargoType targetType = CargoType.Boxes;
 
-        [SerializeField, Tooltip("Очки за кубик. Если меньше или равно 0 — берётся ScoreValue самого кубика.")]
-        private int scorePerCube = 10;
+        [SerializeField, Tooltip("Очки за паллету. Если меньше или равно 0 — берётся ScoreValue самой паллеты.")]
+        private int scorePerPallet = 10;
 
-        [SerializeField, Tooltip("Уничтожать кубик после засчитывания (иначе только отключается физика — см. CubeProperty).")]
-        private bool destroyCube = true;
+        [SerializeField, Tooltip("Уничтожать паллету после засчитывания (иначе только отключается физика — см. CargoPallet).")]
+        private bool destroyPallet = true;
 
-        [SerializeField, Tooltip("Принимать только кубики, которые приносит погрузчик (кубик лежит в объёме вил). Выключено — принимаем любой кубик, заехавший в зону.")]
+        [SerializeField, Tooltip("Принимать только паллеты, которые приносит погрузчик (груз зафиксирован на вилах). Выключено — принимаем любую паллету, заехавшую в зону.")]
         private bool requireForkliftDelivery = false;
 
-        [Header("Ошибочный кубик")]
-        [SerializeField, Tooltip("Логировать кубики неподходящего типа.")]
-        private bool logRejectedCubes = true;
+        [Header("Ошибочный груз")]
+        [SerializeField, Tooltip("Логировать паллеты неподходящего типа.")]
+        private bool logRejectedCargo = true;
 
-        [SerializeField, Tooltip("Штраф за кубик чужого типа (0 — без штрафа).")]
+        [SerializeField, Tooltip("Штраф за паллету чужого типа (0 — без штрафа).")]
         private int wrongTypePenalty = 0;
 
-        [SerializeField, Tooltip("Отбрасывать кубик чужого типа обратно (лёгкий импульс вверх/наружу от центра зоны).")]
-        private bool pushWrongCubeBack = true;
+        [SerializeField, Tooltip("Отбрасывать паллету чужого типа обратно (лёгкий импульс вверх/наружу от центра зоны).")]
+        private bool pushWrongCargoBack = true;
 
-        [SerializeField, Min(0f), Tooltip("Сила отбрасывания кубика чужого типа.")]
-        private float wrongCubePushForce = 3f;
+        [SerializeField, Min(0f), Tooltip("Сила отбрасывания паллеты чужого типа.")]
+        private float wrongCargoPushForce = 3f;
 
         [Header("Только для наглядности")]
         [SerializeField, Tooltip("Цвет подсветки зоны в Gizmos (в игре не используется).")]
         private Color gizmoColor = new Color(1f, 0.2f, 0.2f, 0.25f);
 
-        [SerializeField, Tooltip("Считать кубик только один раз, даже если он остаётся в триггере.")]
-        private bool countOncePerCube = true;
+        [SerializeField, Tooltip("Считать паллету только один раз, даже если она остаётся в триггере.")]
+        private bool countOncePerPallet = true;
 
         private int acceptedCount;
         private int rejectedCount;
 
-        /// <summary>Fired после засчитывания кубика. Аргументы: кубик, зона.</summary>
-        public event Action<CubeProperty, SortingZone> CubeAccepted;
+        /// <summary>Fired после засчитывания груза. Аргументы: паллета, зона.</summary>
+        public event Action<CargoPallet, SortingZone> CargoAccepted;
 
-        /// <summary>Fired когда в зону попал кубик чужого типа. Аргументы: кубик, зона.</summary>
-        public event Action<CubeProperty, SortingZone> CubeRejected;
+        /// <summary>Fired когда в зону попала паллета чужого типа. Аргументы: паллета, зона.</summary>
+        public event Action<CargoPallet, SortingZone> CargoRejected;
 
-        /// <summary>Целевой тип кубика этой зоны.</summary>
-        public CubeColor TargetType { get { return targetType; } }
+        /// <summary>Целевой тип груза этой зоны.</summary>
+        public CargoType TargetType { get { return targetType; } }
 
-        /// <summary>Сколько кубиков зона уже приняла.</summary>
+        /// <summary>Сколько паллет зона уже приняла.</summary>
         public int AcceptedCount { get { return acceptedCount; } }
 
-        /// <summary>Сколько кубиков зона отклонила.</summary>
+        /// <summary>Сколько паллет зона отклонила.</summary>
         public int RejectedCount { get { return rejectedCount; } }
 
         #region Unity-сообщения
@@ -85,9 +86,9 @@ namespace KakayatoBurmalda.Forklift
                 Debug.LogWarning("[SortingZone] Коллайдер зоны не был триггером — включил IsTrigger автоматически.", this);
             }
 
-            if (targetType == CubeColor.None)
+            if (targetType == CargoType.None)
             {
-                Debug.LogWarning("[SortingZone] Целевой тип кубика не назначен (None) — зона будет игнорировать все кубики.", this);
+                Debug.LogWarning("[SortingZone] Целевой тип груза не назначен (None) — зона будет игнорировать все паллеты.", this);
             }
         }
 
@@ -99,62 +100,62 @@ namespace KakayatoBurmalda.Forklift
                 zoneCollider.isTrigger = true;
             }
 
-            scorePerCube = Mathf.Max(0, scorePerCube);
+            scorePerPallet = Mathf.Max(0, scorePerPallet);
             wrongTypePenalty = Mathf.Max(0, wrongTypePenalty);
         }
 
         /// <summary>
-        /// Основная точка входа. Проверяем компонент кубика и сравниваем типы.
+        /// Основная точка входа. Проверяем компонент паллеты и сравниваем типы груза.
         /// </summary>
         private void OnTriggerEnter(Collider other)
         {
-            // Коллайдер может висеть на дочернем объекте — ищем CubeProperty вверх по иерархии.
-            CubeProperty cube = other.GetComponentInParent<CubeProperty>();
-            if (cube == null)
+            // Коллайдер может висеть на дочернем объекте — ищем CargoPallet вверх по иерархии.
+            CargoPallet pallet = other.GetComponentInParent<CargoPallet>();
+            if (pallet == null)
             {
                 return;
             }
 
-            if (countOncePerCube && cube.IsSorted)
+            if (countOncePerPallet && pallet.IsSorted)
             {
                 return;
             }
 
-            if (requireForkliftDelivery && !ForkliftController.IsCubeCarriedByAnyForklift(cube))
+            if (requireForkliftDelivery && !ForkliftController.IsCargoCarriedByAnyForklift(pallet))
             {
                 return;
             }
 
-            if (cube.CubeType == targetType && targetType != CubeColor.None)
+            if (pallet.Cargo == targetType && targetType != CargoType.None)
             {
-                AcceptCube(cube);
+                AcceptPallet(pallet);
             }
             else
             {
-                RejectCube(cube);
+                RejectPallet(pallet);
             }
         }
 
         /// <summary>
-        /// Страховка: если кубик оказался внутри зоны не через Rigidbody-перемещение
+        /// Страховка: если паллета оказалась внутри зоны не через Rigidbody-перемещение
         /// (телепорт, спавн, ручное размещение), OnTriggerEnter мог не сработать.
         /// </summary>
         private void OnTriggerStay(Collider other)
         {
-            CubeProperty cube = other.GetComponentInParent<CubeProperty>();
-            if (cube == null || cube.IsSorted)
+            CargoPallet pallet = other.GetComponentInParent<CargoPallet>();
+            if (pallet == null || pallet.IsSorted)
             {
                 return;
             }
 
-            if (requireForkliftDelivery && !ForkliftController.IsCubeCarriedByAnyForklift(cube))
+            if (requireForkliftDelivery && !ForkliftController.IsCargoCarriedByAnyForklift(pallet))
             {
                 return;
             }
 
-            if (cube.CubeType == targetType && targetType != CubeColor.None)
+            if (pallet.Cargo == targetType && targetType != CargoType.None)
             {
-                AcceptCube(cube);
+                AcceptPallet(pallet);
             }
         }
 
@@ -162,83 +163,83 @@ namespace KakayatoBurmalda.Forklift
 
         #region Логика
 
-        private void AcceptCube(CubeProperty cube)
+        private void AcceptPallet(CargoPallet pallet)
         {
             acceptedCount++;
 
-            int score = scorePerCube > 0 ? scorePerCube : cube.ScoreValue;
+            int score = scorePerPallet > 0 ? scorePerPallet : pallet.ScoreValue;
 
             if (GameManager.Instance != null)
             {
-                GameManager.Instance.ReportCubeSorted(cube, this, score);
+                GameManager.Instance.ReportPalletSorted(pallet, this, score);
             }
             else
             {
                 // Менеджера на сцене нет — игра не должна падать: считаем локально.
                 Debug.Log(string.Format(
-                    "[SortingZone:{0}] Кубик {1} засчитан (+{2} очков). GameManager отсутствует на сцене, счёт хранится в зоне. В зоне принято: {3}.",
+                    "[SortingZone:{0}] Паллета с грузом {1} засчитана (+{2} очков). GameManager отсутствует на сцене, счёт хранится в зоне. В зоне принято: {3}.",
                     name,
-                    cube.CubeType,
+                    pallet.Cargo,
                     score,
                     acceptedCount),
-                    cube);
+                    pallet);
             }
 
-            if (CubeAccepted != null)
+            if (CargoAccepted != null)
             {
-                CubeAccepted(cube, this);
+                CargoAccepted(pallet, this);
             }
 
-            cube.MarkAsSorted();
+            pallet.MarkAsSorted();
 
-            if (!destroyCube)
+            if (!destroyPallet)
             {
-                // Кубик остаётся в зоне как «зачётный»: физика уже отключена в CubeProperty.
-                cube.transform.position = GetStackPoint(acceptedCount - 1);
+                // Паллета остаётся в зоне как «зачётная»: физика уже отключена в CargoPallet.
+                pallet.transform.position = GetStackPoint(acceptedCount - 1);
             }
         }
 
-        private void RejectCube(CubeProperty cube)
+        private void RejectPallet(CargoPallet pallet)
         {
             rejectedCount++;
 
-            if (logRejectedCubes)
+            if (logRejectedCargo)
             {
                 Debug.LogWarning(string.Format(
-                    "[SortingZone:{0}] Кубик типа {1} не подходит: зона принимает только {2}. Отклонено: {3}.",
+                    "[SortingZone:{0}] Паллета с грузом {1} не подходит: зона принимает только {2}. Отклонено: {3}.",
                     name,
-                    cube.CubeType,
+                    pallet.Cargo,
                     targetType,
                     rejectedCount),
-                    cube);
+                    pallet);
             }
 
             if (wrongTypePenalty > 0 && GameManager.Instance != null)
             {
-                GameManager.Instance.ReportCubeMisplaced(cube, this, wrongTypePenalty);
+                GameManager.Instance.ReportPalletMisplaced(pallet, this, wrongTypePenalty);
             }
 
-            if (pushWrongCubeBack && cube.Body != null && !cube.Body.isKinematic)
+            if (pushWrongCargoBack && pallet.Body != null && !pallet.Body.isKinematic && !pallet.IsLocked)
             {
-                Vector3 away = cube.transform.position - transform.position;
+                Vector3 away = pallet.transform.position - transform.position;
                 away.y = 0f;
                 if (away.sqrMagnitude < 0.0001f)
                 {
                     away = -transform.forward;
                 }
 
-                cube.Body.AddForce(away.normalized * wrongCubePushForce + Vector3.up * (wrongCubePushForce * 0.5f), ForceMode.Impulse);
+                pallet.Body.AddForce(away.normalized * wrongCargoPushForce + Vector3.up * (wrongCargoPushForce * 0.5f), ForceMode.Impulse);
             }
 
-            if (CubeRejected != null)
+            if (CargoRejected != null)
             {
-                CubeRejected(cube, this);
+                CargoRejected(pallet, this);
             }
         }
 
         private Vector3 GetStackPoint(int index)
         {
-            // Простая укладка «стопкой» для режима destroyCube = false.
+            // Простая укладка «стопкой» для режима destroyPallet = false.
             Bounds bounds = GetComponent<Collider>().bounds;
             int perRow = 3;
             int column = index % perRow;

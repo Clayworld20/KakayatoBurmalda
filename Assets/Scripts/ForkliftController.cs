@@ -11,7 +11,7 @@ namespace KakayatoBurmalda.Forklift
     /// боковое проскальзывание гасится «сцеплением колёс», плюс есть антиопрокидывающий момент.
     /// Вилы (fork carriage) — дочерний Transform: высота меняется Lerp-ом по localPosition.y
     /// с ограничением по высоте. Так как вилы входят в compound collider корневого Rigidbody,
-    /// они физически поднимают и толкают кубики.
+    /// они физически поднимают паллеты с грузом.
     ///
     /// Раскладка объектов в сцене (пример):
     ///   Forklift (Rigidbody + этот скрипт + BoxCollider на корпус)
@@ -58,6 +58,17 @@ namespace KakayatoBurmalda.Forklift
             [HideInInspector] public bool initialized;
         }
 
+        /// <summary>Состояние одной паллеты, зафиксированной на вилах (для плавной доводки на место).</summary>
+        private struct LockedCargoState
+        {
+            public CargoPallet pallet;
+            public float lockTime;
+            public Vector3 startLocalPosition;
+            public Quaternion startLocalRotation;
+            public Vector3 targetLocalPosition;
+            public Quaternion targetLocalRotation;
+        }
+
         #endregion
 
         #region Ссылки
@@ -72,6 +83,9 @@ namespace KakayatoBurmalda.Forklift
         [Tooltip("Шарнир наклона мачты (необязательно). Вращается по локальному X.")]
         [SerializeField] private Transform mastTiltPivot;
 
+        [Tooltip("Коллайдер вил: по нему считается посадочное место паллеты. Если пусто — берётся первый BoxCollider каретки.")]
+        [SerializeField] private BoxCollider forkCollider;
+
         [Tooltip("Точка возврата при сбросе погрузчика (клавиша R). Если пусто — позиция на момент старта.")]
         [SerializeField] private Transform resetPoint;
 
@@ -84,11 +98,11 @@ namespace KakayatoBurmalda.Forklift
         [SerializeField, Min(0.01f), Tooltip("Радиус сферы проверки заземления, м.")]
         private float groundCheckRadius = 0.22f;
 
-        [SerializeField, Tooltip("Если маска = «Everything», попробовать найти слой Ground по имени, чтобы никогда не цеплять корпус и кубики.")]
+        [SerializeField, Tooltip("Если маска = «Everything», попробовать найти слой Ground по имени, чтобы никогда не цеплять корпус и груз.")]
         private bool autoResolveGroundLayer = true;
 
-        [Tooltip("Слои, на которых ищутся кубики при удержании на вилах.")]
-        [SerializeField] private LayerMask cubeLayers = ~0;
+        [Tooltip("Слои, на которых ищутся паллеты с грузом при захвате вилами.")]
+        [SerializeField] private LayerMask cargoLayers = ~0;
 
         [Tooltip("Визуальные колёса (не влияют на физику — физику считает Rigidbody).")]
         [SerializeField] private WheelVisual[] wheelVisuals;
@@ -229,26 +243,35 @@ namespace KakayatoBurmalda.Forklift
 
         #endregion
 
-        #region Удержание кубиков
+        #region Захват груза (Locking Mechanism)
 
-        [Header("Удержание кубиков на вилах")]
-        [SerializeField, Tooltip("Подмешивать скорость кубику, чтобы он не «съезжал» с вил на поворотах и кочках.")]
-        private bool carryAssist = true;
-
-        [SerializeField, Tooltip("Центр объёма захвата в локальных координатах каретки.")]
-        private Vector3 carryVolumeCenter = new Vector3(0f, 0.3f, 0.3f);
+        [Header("Захват груза на вилах")]
+        [SerializeField, Tooltip("Центр объёма захвата в локальных координатах каретки: паллета в этом объёме считается «на вилах».")]
+        private Vector3 carryVolumeCenter = new Vector3(0f, 0.3f, 0.45f);
 
         [SerializeField, Tooltip("Размер объёма захвата в локальных координатах каретки.")]
-        private Vector3 carryVolumeSize = new Vector3(1.6f, 0.9f, 1.8f);
+        private Vector3 carryVolumeSize = new Vector3(1.6f, 0.9f, 1.7f);
 
-        [SerializeField, Min(0f), Tooltip("Сила подмешивания скорости кубика (1/с).")]
-        private float carryAssistStrength = 9f;
+        [SerializeField, Tooltip("Автоматически фиксировать паллету, коснувшуюся вил (иначе только по клавише захвата).")]
+        private bool autoLockCargo = true;
 
-        [SerializeField, Min(0f), Tooltip("Прижим кубика к вилам, м/с².")]
-        private float carryAssistDownforce = 2.5f;
+        [SerializeField, Tooltip("Клавиша «захватить / отпустить груз».")]
+        private KeyCode grabKey = KeyCode.F;
 
-        [SerializeField, Min(0f), Tooltip("Гашение вращения кубика на вилах (1/с).")]
-        private float carryAssistTorqueDamping = 5f;
+        [SerializeField, Min(0.02f), Tooltip("За сколько секунд паллета плавно «садится» на вилы после захвата.")]
+        private float lockAlignDuration = 0.22f;
+
+        [SerializeField, Min(0f), Tooltip("Пауза перед повторным захватом той же паллеты после отпускания, с.")]
+        private float relockDelay = 0.5f;
+
+        [SerializeField, Tooltip("Отпускать груз, когда вилы опущены в нижнее положение (после того как груз хотя бы раз подняли).")]
+        private bool autoReleaseWhenLowered = true;
+
+        [SerializeField, Min(0f), Tooltip("Высота подъёма (м), после которой начинает работать автоотпускание при опускании вил.")]
+        private float autoReleaseLiftHeight = 0.25f;
+
+        [SerializeField, Tooltip("Учитывать массу груза: с паллетой на вилах погрузчик тяжелее.")]
+        private bool applyCargoWeight = true;
 
         #endregion
 
@@ -297,8 +320,12 @@ namespace KakayatoBurmalda.Forklift
 
         private Rigidbody body;
         private Collider[] overlapBuffer = new Collider[16];
+        private Collider[] forkliftColliders = new Collider[0];
         private readonly RaycastHit[] groundHitsBuffer = new RaycastHit[8];
-        private readonly List<CubeProperty> carriedCubes = new List<CubeProperty>();
+        private readonly List<LockedCargoState> lockedCargo = new List<LockedCargoState>();
+        private readonly HashSet<CargoPallet> cargoInVolume = new HashSet<CargoPallet>();
+        private readonly HashSet<CargoPallet> mustExitBeforeRelock = new HashSet<CargoPallet>();
+        private readonly List<CargoPallet> cargoCleanupBuffer = new List<CargoPallet>();
 
         private float throttleInput;
         private float steerInput;
@@ -319,7 +346,11 @@ namespace KakayatoBurmalda.Forklift
         private float currentYawRate;
         private float currentVisualSteerAngle;
         private float currentMotor;
-        private int carriedCubesInVolume;
+        private int cargoInVolumeCount;
+        private float baseMass;
+        private bool grabRequested;
+        private bool releaseRequested;
+        private bool liftedSinceLock;
         private bool resetRequested;
         private float stalledTime;
         private bool stallWarningLogged;
@@ -340,8 +371,14 @@ namespace KakayatoBurmalda.Forklift
         /// <summary>Скорость по модулю, м/с.</summary>
         public float Speed { get; private set; }
 
-        /// <summary>Есть ли кубик в объёме вил.</summary>
-        public bool IsCarryingCube { get { return carriedCubesInVolume > 0; } }
+        /// <summary>Есть ли груз на вилах.</summary>
+        public bool IsCarryingCargo { get { return lockedCargo.Count > 0; } }
+
+        /// <summary>Сколько паллет зафиксировано на вилах сейчас.</summary>
+        public int CarriedCargoCount { get { return lockedCargo.Count; } }
+
+        /// <summary>Сколько паллет находится в объёме захвата (включая зафиксированные).</summary>
+        public int CargoInVolumeCount { get { return cargoInVolumeCount; } }
 
         /// <summary>Текущая высота вил (локальная Y каретки).</summary>
         public float ForkHeight { get { return currentForkHeight; } }
@@ -377,7 +414,7 @@ namespace KakayatoBurmalda.Forklift
         /// <summary>Rigidbody корпуса (кэш).</summary>
         public Rigidbody Body { get { return body; } }
 
-        /// <summary>Transform каретки вил (для внешних систем, например крепления кубика).</summary>
+        /// <summary>Transform каретки вил (для внешних систем, например крепления груза).</summary>
         public Transform ForkCarriage { get { return forkCarriage; } }
 
         #endregion
@@ -388,6 +425,13 @@ namespace KakayatoBurmalda.Forklift
         {
             body = GetComponent<Rigidbody>();
             body.interpolation = interpolation;
+            baseMass = Mathf.Max(1f, body.mass);
+            forkliftColliders = GetComponentsInChildren<Collider>(true);
+
+            if (forkCollider == null && forkCarriage != null)
+            {
+                forkCollider = forkCarriage.GetComponent<BoxCollider>();
+            }
 
             // Стартовое состояние ввода — строго нулевое: ручник выключен, газ/руль/вилы в покое.
             throttleInput = 0f;
@@ -461,6 +505,12 @@ namespace KakayatoBurmalda.Forklift
             {
                 RequestReset();
             }
+
+            // F — взять груз на вилы либо отпустить уже зафиксированный.
+            if (readKeyboardInput && Input.GetKeyDown(grabKey))
+            {
+                grabRequested = true;
+            }
 #endif
         }
 
@@ -477,7 +527,7 @@ namespace KakayatoBurmalda.Forklift
             UpdateGroundedState();
             UpdateForkHeight(deltaTime);
             UpdateMastTilt(deltaTime);
-            UpdateCarryVolume(deltaTime);
+            UpdateCargoGrab();
             ApplyDrive(deltaTime);
             ApplySteering(deltaTime);
             ApplyLateralGrip(deltaTime);
@@ -490,8 +540,10 @@ namespace KakayatoBurmalda.Forklift
         private void OnDisable()
         {
             ActiveForklifts.Remove(this);
-            carriedCubes.Clear();
-            carriedCubesInVolume = 0;
+            ReleaseAllCargo();
+            cargoInVolume.Clear();
+            mustExitBeforeRelock.Clear();
+            cargoInVolumeCount = 0;
         }
 
         private void OnValidate()
@@ -504,6 +556,9 @@ namespace KakayatoBurmalda.Forklift
                 Mathf.Max(0.05f, carryVolumeSize.y),
                 Mathf.Max(0.05f, carryVolumeSize.z));
             mastMinTilt = Mathf.Min(mastMinTilt, mastMaxTilt);
+            lockAlignDuration = Mathf.Max(0.02f, lockAlignDuration);
+            relockDelay = Mathf.Max(0f, relockDelay);
+            autoReleaseLiftHeight = Mathf.Max(0f, autoReleaseLiftHeight);
         }
 
         #endregion
@@ -557,14 +612,27 @@ namespace KakayatoBurmalda.Forklift
             }
         }
 
-        /// <summary>Лежит ли конкретный кубик сейчас в объёме вил этого погрузчика.</summary>
-        public bool IsCarrying(CubeProperty cube)
+        /// <summary>Зафиксирована ли конкретная паллета на вилах этого погрузчика.</summary>
+        public bool IsCarrying(CargoPallet pallet)
         {
-            return cube != null && carriedCubes.Contains(cube);
+            if (pallet == null)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < lockedCargo.Count; i++)
+            {
+                if (lockedCargo[i].pallet == pallet)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
-        /// <summary>Скопировать список кубиков, которые лежат на вилах сейчас.</summary>
-        public void GetCarriedCubes(List<CubeProperty> results)
+        /// <summary>Скопировать список паллет, зафиксированных на вилах сейчас.</summary>
+        public void GetCarriedCargo(List<CargoPallet> results)
         {
             if (results == null)
             {
@@ -572,13 +640,32 @@ namespace KakayatoBurmalda.Forklift
             }
 
             results.Clear();
-            results.AddRange(carriedCubes);
+
+            for (int i = 0; i < lockedCargo.Count; i++)
+            {
+                if (lockedCargo[i].pallet != null)
+                {
+                    results.Add(lockedCargo[i].pallet);
+                }
+            }
         }
 
-        /// <summary>Есть ли кубик на вилах хотя бы у одного погрузчика сцены. Используется зонами сортировки.</summary>
-        public static bool IsCubeCarriedByAnyForklift(CubeProperty cube)
+        /// <summary>Взять груз с вил (запрос извне: кнопка UI, адаптер ввода, AI).</summary>
+        public void GrabCargo()
         {
-            if (cube == null)
+            grabRequested = true;
+        }
+
+        /// <summary>Отпустить груз с вил (запрос извне: кнопка UI, адаптер ввода, AI).</summary>
+        public void ReleaseCargo()
+        {
+            releaseRequested = true;
+        }
+
+        /// <summary>Есть ли паллета на вилах хотя бы у одного погрузчика сцены. Используется зонами сортировки.</summary>
+        public static bool IsCargoCarriedByAnyForklift(CargoPallet pallet)
+        {
+            if (pallet == null)
             {
                 return false;
             }
@@ -592,7 +679,7 @@ namespace KakayatoBurmalda.Forklift
                     continue;
                 }
 
-                if (forklift.IsCarrying(cube))
+                if (forklift.IsCarrying(pallet))
                 {
                     return true;
                 }
@@ -662,7 +749,7 @@ namespace KakayatoBurmalda.Forklift
         {
             // Сфера вниз из GroundCheck. Маска слоёв отсекает всё лишнее ещё на уровне физики,
             // а фильтр по иерархии/rigidbody выбрасывает коллайдеры самого погрузчика (вилы, каретка,
-            // корпус) и кубики, даже если они случайно попали в маску.
+            // корпус) и груз, даже если они случайно попали в маску.
             Vector3 origin = groundCheck != null ? groundCheck.position : transform.position + Vector3.up * 0.25f;
             float radius = Mathf.Max(0.01f, groundCheckRadius);
             float distance = Mathf.Max(0.05f, groundCheckDistance);
@@ -702,8 +789,8 @@ namespace KakayatoBurmalda.Forklift
                     continue;
                 }
 
-                // Кубики — это груз, а не опора.
-                if (hitCollider.GetComponentInParent<CubeProperty>() != null)
+                // Паллеты с грузом — это груз, а не опора.
+                if (hitCollider.GetComponentInParent<CargoPallet>() != null)
                 {
                     continue;
                 }
@@ -724,7 +811,7 @@ namespace KakayatoBurmalda.Forklift
         /// <summary>
         /// Определить рабочую маску земли. Если пользователь оставил «Everything»,
         /// пробуем найти слой Ground по имени — тогда проверка гарантированно не цепляет
-        /// собственный корпус и кубики.
+        /// собственный корпус и груз.
         /// </summary>
         private void ResolveGroundLayers()
         {
@@ -813,16 +900,190 @@ namespace KakayatoBurmalda.Forklift
         }
 
         /// <summary>
-        /// Ищем кубики в объёме вил. Помимо подсветки состояния (IsCarryingCube),
-        /// опционально подмешиваем им скорость корпуса — иначе на поворотах груз улетает с вил.
+        /// Захват груза вилами. Паллета, коснувшаяся вил, по клавише (или автоматически) фиксируется:
+        /// Rigidbody становится kinematic, паллета становится ребёнком каретки и плавно доводится до
+        /// посадочного места на вилах. Взаимные столкновения с погрузчиком выключаются, поэтому
+        /// груз не дрожит и не соскальзывает на поворотах.
         /// </summary>
-        private void UpdateCarryVolume(float deltaTime)
+        private void UpdateCargoGrab()
         {
-            carriedCubesInVolume = 0;
-            carriedCubes.Clear();
+            UpdateLockedCargoAlignment();
+            RefreshCargoVolume();
+            CleanupLockedCargo();
 
             if (forkCarriage == null)
             {
+                grabRequested = false;
+                releaseRequested = false;
+                return;
+            }
+
+            bool manualGrab = grabRequested;
+            bool manualRelease = releaseRequested;
+            grabRequested = false;
+            releaseRequested = false;
+
+            if (manualRelease || (manualGrab && lockedCargo.Count > 0))
+            {
+                ReleaseAllCargo();
+                return;
+            }
+
+            if (lockedCargo.Count == 0)
+            {
+                if (manualGrab || autoLockCargo)
+                {
+                    CargoPallet candidate = FindGrabCandidate(manualGrab);
+
+                    if (candidate != null)
+                    {
+                        LockCargo(candidate);
+                    }
+                }
+
+                return;
+            }
+
+            // Груз на вилах: помним, что его поднимали, и слушаем автоотпускание при опускании.
+            if (currentForkHeight > forkMinHeight + autoReleaseLiftHeight)
+            {
+                liftedSinceLock = true;
+            }
+
+            if (autoReleaseWhenLowered && liftedSinceLock && liftInput <= 0.001f &&
+                currentForkHeight <= forkMinHeight + 0.05f)
+            {
+                ReleaseAllCargo();
+            }
+        }
+
+        /// <summary>Посадить паллету на вилы: kinematic + ребёнок каретки + плавная доводка до места.</summary>
+        private void LockCargo(CargoPallet pallet)
+        {
+            if (pallet == null || pallet.IsSorted || pallet.IsLocked)
+            {
+                return;
+            }
+
+            if (pallet.Body != null)
+            {
+                pallet.Body.velocity = Vector3.zero;
+                pallet.Body.angularVelocity = Vector3.zero;
+            }
+
+            SetCollisionsWithForklift(pallet, false);
+            pallet.LockTo(this);
+            pallet.transform.SetParent(forkCarriage, true);
+
+            LockedCargoState state = default(LockedCargoState);
+            state.pallet = pallet;
+            state.lockTime = Time.fixedTime;
+            state.startLocalPosition = pallet.transform.localPosition;
+            state.startLocalRotation = pallet.transform.localRotation;
+            state.targetLocalPosition = ComputeForkSlotPosition(pallet);
+            state.targetLocalRotation = Quaternion.identity;
+            lockedCargo.Add(state);
+
+            liftedSinceLock = false;
+            UpdateCarryMass();
+        }
+
+        /// <summary>Отпустить весь груз: физика возвращается, паллета остаётся на месте выгрузки.</summary>
+        private void ReleaseAllCargo()
+        {
+            if (lockedCargo.Count == 0)
+            {
+                return;
+            }
+
+            for (int i = lockedCargo.Count - 1; i >= 0; i--)
+            {
+                CargoPallet pallet = lockedCargo[i].pallet;
+                lockedCargo.RemoveAt(i);
+
+                if (pallet == null)
+                {
+                    continue;
+                }
+
+                pallet.transform.SetParent(pallet.HomeParent, true);
+                SetCollisionsWithForklift(pallet, true);
+                pallet.ReleaseFromLock();
+
+                if (pallet.Body != null && !pallet.Body.isKinematic)
+                {
+                    // Груз наследует скорость погрузчика — выгрузка на ходу выглядит естественно.
+                    pallet.Body.velocity = body != null ? body.velocity : Vector3.zero;
+                    pallet.Body.angularVelocity = Vector3.zero;
+                }
+
+                // Пока паллета не вышла из объёма захвата, автоматически её больше не берём:
+                // иначе выгруженный груз мгновенно «прилипал» бы обратно к вилам.
+                mustExitBeforeRelock.Add(pallet);
+            }
+
+            liftedSinceLock = false;
+            UpdateCarryMass();
+        }
+
+        /// <summary>Плавная доводка зафиксированных паллет до посадочного места на вилах.</summary>
+        private void UpdateLockedCargoAlignment()
+        {
+            if (lockedCargo.Count == 0)
+            {
+                return;
+            }
+
+            float duration = Mathf.Max(0.02f, lockAlignDuration);
+
+            for (int i = 0; i < lockedCargo.Count; i++)
+            {
+                LockedCargoState state = lockedCargo[i];
+                CargoPallet pallet = state.pallet;
+
+                if (pallet == null)
+                {
+                    continue;
+                }
+
+                float raw = Mathf.Clamp01((Time.fixedTime - state.lockTime) / duration);
+                float smooth = raw * raw * (3f - 2f * raw);
+
+                if (raw >= 1f)
+                {
+                    state.startLocalPosition = state.targetLocalPosition;
+                    state.startLocalRotation = state.targetLocalRotation;
+                }
+
+                Transform palletTransform = pallet.transform;
+                palletTransform.localPosition = Vector3.Lerp(state.startLocalPosition, state.targetLocalPosition, smooth);
+                palletTransform.localRotation = Quaternion.Slerp(state.startLocalRotation, state.targetLocalRotation, smooth);
+                lockedCargo[i] = state;
+            }
+        }
+
+        /// <summary>Посадочное место паллеты: её низ ложится на верхнюю плоскость вил, центр — по центру вил.</summary>
+        private Vector3 ComputeForkSlotPosition(CargoPallet pallet)
+        {
+            float forkTopLocalY = forkCollider != null
+                ? forkCollider.center.y + forkCollider.size.y * 0.5f
+                : 0.07f;
+
+            float slotLocalZ = forkCollider != null ? forkCollider.center.z : 0.7f;
+            float bottomOffset = pallet != null ? pallet.BottomOffset : 0f;
+
+            return new Vector3(0f, forkTopLocalY + bottomOffset + 0.01f, slotLocalZ);
+        }
+
+        /// <summary>Обновить список паллет в объёме захвата и снять правило «сначала выйти из объёма» с тех, кто уже вышел.</summary>
+        private void RefreshCargoVolume()
+        {
+            cargoInVolume.Clear();
+            cargoInVolumeCount = 0;
+
+            if (forkCarriage == null)
+            {
+                mustExitBeforeRelock.Clear();
                 return;
             }
 
@@ -834,7 +1095,7 @@ namespace KakayatoBurmalda.Forklift
                 halfExtents,
                 overlapBuffer,
                 forkCarriage.rotation,
-                cubeLayers,
+                cargoLayers,
                 QueryTriggerInteraction.Ignore);
 
             for (int i = 0; i < count; i++)
@@ -845,48 +1106,178 @@ namespace KakayatoBurmalda.Forklift
                     continue;
                 }
 
-                CubeProperty cube = other.GetComponentInParent<CubeProperty>();
-                if (cube == null || cube.IsSorted)
+                CargoPallet pallet = other.GetComponentInParent<CargoPallet>();
+                if (pallet == null || pallet.IsSorted || pallet.IsLocked)
                 {
                     continue;
                 }
 
-                carriedCubesInVolume++;
-                carriedCubes.Add(cube);
-
-                if (carryAssist)
-                {
-                    ApplyCarryAssist(cube, deltaTime);
-                }
+                cargoInVolume.Add(pallet);
+                cargoInVolumeCount++;
             }
-        }
 
-        private void ApplyCarryAssist(CubeProperty cube, float deltaTime)
-        {
-            Rigidbody cubeBody = cube.Body;
-            if (cubeBody == null || cubeBody.isKinematic)
+            if (mustExitBeforeRelock.Count == 0)
             {
                 return;
             }
 
-            float blend = Mathf.Clamp01(carryAssistStrength * deltaTime);
+            cargoCleanupBuffer.Clear();
 
-            // Горизонтальную скорость кубика подтягиваем к скорости погрузчика, вертикаль не трогаем —
-            // кубик должен свободно ложиться на вилы и падать с них.
-            Vector3 relativeVelocity = cubeBody.velocity - body.velocity;
-            relativeVelocity.y = 0f;
-            cubeBody.AddForce(-relativeVelocity * blend, ForceMode.VelocityChange);
-
-            if (carryAssistDownforce > 0f)
+            foreach (CargoPallet pallet in mustExitBeforeRelock)
             {
-                cubeBody.AddForce(-transform.up * carryAssistDownforce, ForceMode.Acceleration);
+                if (pallet == null || !cargoInVolume.Contains(pallet))
+                {
+                    cargoCleanupBuffer.Add(pallet);
+                }
             }
 
-            if (carryAssistTorqueDamping > 0f)
+            for (int i = 0; i < cargoCleanupBuffer.Count; i++)
             {
-                float torqueBlend = Mathf.Clamp01(carryAssistTorqueDamping * deltaTime);
-                Vector3 relativeAngular = cubeBody.angularVelocity - body.angularVelocity;
-                cubeBody.angularVelocity = cubeBody.angularVelocity - relativeAngular * torqueBlend;
+                mustExitBeforeRelock.Remove(cargoCleanupBuffer[i]);
+            }
+        }
+
+        /// <summary>Убрать из списка зафиксированных уничтоженные или уже засчитанные паллеты.</summary>
+        private void CleanupLockedCargo()
+        {
+            if (lockedCargo.Count == 0)
+            {
+                return;
+            }
+
+            bool massChanged = false;
+
+            for (int i = lockedCargo.Count - 1; i >= 0; i--)
+            {
+                CargoPallet pallet = lockedCargo[i].pallet;
+
+                if (pallet != null && !pallet.IsSorted)
+                {
+                    continue;
+                }
+
+                if (pallet != null)
+                {
+                    // Паллету засчитали прямо на вилах: возвращаем её в исходного родителя,
+                    // чтобы она не уехала вместе с кареткой (и не исчезла в амбаре вместе с погрузчиком).
+                    pallet.transform.SetParent(pallet.HomeParent, true);
+                    SetCollisionsWithForklift(pallet, true);
+                }
+
+                lockedCargo.RemoveAt(i);
+                massChanged = true;
+            }
+
+            if (massChanged)
+            {
+                UpdateCarryMass();
+            }
+        }
+
+        /// <summary>Кандидат на захват: ближайшая паллета в объёме вил, ещё не занятая и не «только что отпущенная».</summary>
+        private CargoPallet FindGrabCandidate(bool manualGrab)
+        {
+            if (cargoInVolume.Count == 0)
+            {
+                return null;
+            }
+
+            CargoPallet best = null;
+            float bestDistance = float.MaxValue;
+            Vector3 carriagePosition = forkCarriage.position;
+
+            foreach (CargoPallet pallet in cargoInVolume)
+            {
+                if (pallet == null || pallet.IsSorted || pallet.IsLocked || pallet.IsLockedByOther(this))
+                {
+                    continue;
+                }
+
+                if (manualGrab)
+                {
+                    // Ручной захват: паллету можно взять сразу после отпускания (небольшая пауза от дребезга).
+                    if (Time.time - pallet.LastReleaseTime < relockDelay)
+                    {
+                        continue;
+                    }
+                }
+                else if (mustExitBeforeRelock.Contains(pallet))
+                {
+                    // Автозахват: сначала паллета должна покинуть объём вил, иначе выгруженный груз липнет обратно.
+                    continue;
+                }
+
+                float distance = (pallet.transform.position - carriagePosition).sqrMagnitude;
+
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    best = pallet;
+                }
+            }
+
+            return best;
+        }
+
+        /// <summary>
+        /// Включить/выключить взаимные столкновения паллеты и погрузчика: на вилах они не должны
+        /// толкать друг друга (иначе kinematic-груз «выстреливает» динамический корпус).
+        /// </summary>
+        private void SetCollisionsWithForklift(CargoPallet pallet, bool ignore)
+        {
+            if (pallet == null || forkliftColliders == null || forkliftColliders.Length == 0)
+            {
+                return;
+            }
+
+            Collider[] palletColliders = pallet.GetComponentsInChildren<Collider>(true);
+
+            for (int i = 0; i < palletColliders.Length; i++)
+            {
+                Collider palletCollider = palletColliders[i];
+                if (palletCollider == null)
+                {
+                    continue;
+                }
+
+                for (int j = 0; j < forkliftColliders.Length; j++)
+                {
+                    Collider forkliftCollider = forkliftColliders[j];
+                    if (forkliftCollider == null)
+                    {
+                        continue;
+                    }
+
+                    Physics.IgnoreCollision(palletCollider, forkliftCollider, ignore);
+                }
+            }
+        }
+
+        /// <summary>Масса погрузчика с учётом груза на вилах (тяжёлая паллета ухудшает разгон).</summary>
+        private void UpdateCarryMass()
+        {
+            if (body == null || !applyCargoWeight)
+            {
+                return;
+            }
+
+            float cargoMass = 0f;
+
+            for (int i = 0; i < lockedCargo.Count; i++)
+            {
+                CargoPallet pallet = lockedCargo[i].pallet;
+
+                if (pallet != null && pallet.Body != null)
+                {
+                    cargoMass += pallet.Body.mass;
+                }
+            }
+
+            float targetMass = baseMass + cargoMass;
+
+            if (!Mathf.Approximately(body.mass, targetMass))
+            {
+                body.mass = targetMass;
             }
         }
 
@@ -1013,7 +1404,7 @@ namespace KakayatoBurmalda.Forklift
             Debug.Log(string.Format(
                 "[ForkliftController:{0}] заземлён={1} (нормаль {2}), маска земли={3} (Ground = {4}), ручник={5}, газ={6:F2}, " +
                 "руль={7:F2}, мотор={8:F2}, скорость вперёд={9:F2} м/с, масса={10:F0} кг, тяга={11:F0}/{12:F0} Н, " +
-                "вилы={13:F2} м, FPS-физика={14:F0} Гц, кубиков на вилах={15}.",
+                "вилы={13:F2} м, FPS-физика={14:F0} Гц, груза зафиксировано={15}, паллет в объёме захвата={16}.",
                 name,
                 IsGrounded,
                 GroundNormal,
@@ -1029,7 +1420,8 @@ namespace KakayatoBurmalda.Forklift
                 reverseMotorForce,
                 currentForkHeight,
                 1f / Mathf.Max(0.0001f, Time.fixedDeltaTime),
-                carriedCubesInVolume),
+                lockedCargo.Count,
+                cargoInVolumeCount),
                 this);
         }
 

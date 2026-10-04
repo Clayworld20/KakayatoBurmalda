@@ -21,21 +21,24 @@ namespace KakayatoBurmalda.Forklift.EditorTools
     ///
     /// Что создаёт:
     ///   DemoScene
-    ///     ├── Ground                     — площадка (BoxCollider + материал)
+    ///     ├── Ground                     — площадка (BoxCollider + материал) и грунтовая дорога
+    ///     ├── House                      — фермерский дом: кирпичный поясок, окна в рамах, козырёк, крыша с коньком
+    ///     ├── Barn                       — амбар: дверная рама въезда, обшивка стен, каркас, сено
+    ///     │     └── SortingZone_Boxes / _Barrels / _Construction — триггерные зоны по типу груза
     ///     ├── Forklift                   — корпус с Rigidbody, тег Forklift, скрипт ForkliftController
-    ///     │     ├── Body/Cabin/OverheadGuard/Mast (меши без коллайдеров)
-    ///     │     ├── MastTiltPivot → ForkCarriage (вилы: коллайдеры + меши)
+    ///     │     ├── Body/Counterweight/RearTank/Cabin/OverheadGuard/Mast (меши без коллайдеров)
+    ///     │     ├── MastTiltPivot → ForkCarriage (вилы: коллайдеры, скос-заезд, меши)
     ///     │     ├── GroundCheck
-    ///     │     └── Wheel_FL/FR/RL/RR → Tire (цилиндры)
+    ///     │     └── Wheel_FL/FR/RL/RR → Tire + Rim + Hub + Tread (протектор)
     ///     ├── ForkliftResetPoint         — точка сброса погрузчика (клавиша R)
-    ///     ├── SortingZone_Red/Green/Blue — триггерные зоны с материалами
-    ///     ├── Cubes/…                    — 9 кубиков (по 3 цвета) с CubeProperty и Rigidbody
+    ///     ├── CargoPallets/…             — паллеты с грузом (ящики, бочки, стройматериалы), CargoPallet + Rigidbody
     ///     ├── GameManager                — менеджер игры
-    ///     └── GameCanvas (опционально)   — HUD со скриптом GameUIController
+    ///     ├── GameCanvas (опционально)   — HUD со скриптом GameUIController
+    ///     └── Main Camera (опционально)  — CameraFollow: плавный вид от третьего лица
     ///
-    /// Все ссылки в инспекторах (каретка вил, визуальные колёса, маски слоёв, целевые типы зон,
-    /// типы кубиков, ссылки HUD) назначаются кодом через SerializedObject, поэтому сцена
-    /// собирается в один клик. Создаваемые объекты регистрируются в Undo.
+    /// Все ссылки в инспекторах (каретка вил, визуальные колёса, маски слоёв, целевые типы груза,
+    /// настройки захвата, ссылки HUD и цель камеры) назначаются кодом через SerializedObject,
+    /// поэтому сцена собирается в один клик. Создаваемые объекты регистрируются в Undo.
     /// </summary>
     public class DemoSceneGenerator : EditorWindow
     {
@@ -55,9 +58,14 @@ namespace KakayatoBurmalda.Forklift.EditorTools
         // ── Раскладка уровня: ферма (дом у старта, амбар с зонами сортировки в глубине) ──
 
         private const float GroundSize = 90f;
-        private const float CubeSize = 0.8f;
-        private const int DefaultCubesPerColor = 3;
+        private const int DefaultPalletsPerType = 3;
         private const float WheelRadius = 0.3f;
+
+        // Паллета: настил на подкладках (декор), физический коллайдер — один, на всю паллету с грузом.
+        private const float PalletDeckHeight = 0.11f;
+        private const float PalletSizeX = 1.25f;
+        private const float PalletSizeZ = 1.05f;
+        private const float PalletSlatHeight = 0.04f;
 
         /// <summary>Нижнее положение вил в демо-сцене (используется при расчёте геометрии скоса-заезда).</summary>
         private const float ForkMinHeight = 0.02f;
@@ -115,19 +123,19 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             [Tooltip("Перед генерацией удалить ранее сгенерированные демо-объекты (DemoScene и объекты сцены).")]
             public bool clearExistingDemoObjects = true;
 
-            [Tooltip("Прикрепить камеру к погрузчику сзади (вид от третьего лица).")]
+            [Tooltip("Добавить на камеру CameraFollow: плавный вид от третьего лица сзади-сверху.")]
             public bool attachCameraToForklift = true;
 
-            [Range(-180f, 180f), Tooltip("Начальный поворот погрузчика по оси Y, градусы. 0 — вилы смотрят на кубики и амбар (+Z).")]
+            [Range(-180f, 180f), Tooltip("Начальный поворот погрузчика по оси Y, градусы. 0 — вилы смотрят на паллеты и амбар (+Z).")]
             public float forkliftStartYaw = 0f;
 
-            [Range(1, 6), Tooltip("Сколько кубиков каждого цвета создать.")]
-            public int cubesPerColor = DefaultCubesPerColor;
+            [Range(1, 4), Tooltip("Сколько паллет с грузом каждого типа создать (ящики, бочки, стройматериалы).")]
+            public int palletsPerType = DefaultPalletsPerType;
 
-            [Tooltip("Создать теги Forklift / Cube / SortingZone / Ground.")]
+            [Tooltip("Создать теги Forklift / Cargo / SortingZone / Ground / Barn.")]
             public bool createTags = true;
 
-            [Tooltip("Создать слои Ground и Cube (для корректных масок в контроллере).")]
+            [Tooltip("Создать слои Ground и Cargo (для корректных масок в контроллере).")]
             public bool createLayers = true;
 
             [Tooltip("Создать и назначить материалы (стандартный или URP-шейдер).")]
@@ -205,8 +213,8 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             EditorGUILayout.LabelField("Генератор демо-сцены погрузчика", EditorStyles.boldLabel);
             EditorGUILayout.HelpBox(
                 "Соберёт ферму: площадку с дорогой, дом у старта, амбар с тремя зонами сортировки внутри, " +
-                "погрузчик с вилами, кубики на улице, GameManager и HUD. Все ссылки в инспекторах назначаются кодом, " +
-                "действия можно отменить (Ctrl+Z).",
+                "детализированный погрузчик с вилами, паллеты с грузом на улице (ящики, бочки, стройматериалы), " +
+                "GameManager, HUD и следящую камеру. Все ссылки в инспекторах назначаются кодом, действия можно отменить (Ctrl+Z).",
                 MessageType.Info);
 
             EditorGUILayout.Space(6f);
@@ -225,7 +233,7 @@ namespace KakayatoBurmalda.Forklift.EditorTools
 
             options.attachCameraToForklift = EditorGUILayout.Toggle("Камера следует за погрузчиком", options.attachCameraToForklift);
             options.forkliftStartYaw = EditorGUILayout.Slider("Поворот погрузчика, °", options.forkliftStartYaw, -180f, 180f);
-            options.cubesPerColor = EditorGUILayout.IntSlider("Кубиков каждого цвета", options.cubesPerColor, 1, 6);
+            options.palletsPerType = EditorGUILayout.IntSlider("Паллет каждого типа груза", options.palletsPerType, 1, 4);
 
             showAdvanced = EditorGUILayout.Foldout(showAdvanced, "Дополнительно", true);
             if (showAdvanced)
@@ -233,7 +241,7 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 EditorGUI.indentLevel++;
                 options.createFarmBuildings = EditorGUILayout.Toggle("Дом и амбар", options.createFarmBuildings);
                 options.createTags = EditorGUILayout.Toggle("Создать теги", options.createTags);
-                options.createLayers = EditorGUILayout.Toggle("Создать слои Ground/Cube", options.createLayers);
+                options.createLayers = EditorGUILayout.Toggle("Создать слои Ground/Cargo", options.createLayers);
                 options.createMaterials = EditorGUILayout.Toggle("Создать материалы", options.createMaterials);
                 options.createHud = EditorGUILayout.Toggle("Создать HUD (Canvas)", options.createHud);
                 options.saveSceneAsset = EditorGUILayout.Toggle("Сохранить сцену в файл", options.saveSceneAsset);
@@ -302,8 +310,8 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             }
 
             EditorGUILayout.Space(8f);
-            EditorGUILayout.LabelField(string.Format("Версия компонентов: {0} кубиков, {1} зоны (красная, зелёная, синяя).",
-                options.cubesPerColor * 3,
+            EditorGUILayout.LabelField(string.Format("Версия компонентов: {0} паллет с грузом, {1} зоны сортировки (ящики, бочки, стройматериалы).",
+                options.palletsPerType * 3,
                 3),
                 EditorStyles.miniLabel);
 
@@ -365,8 +373,8 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 }
 
                 EditorUtility.DisplayProgressBar("Генерация демо-сцены", "Теги и слои...", 0.12f);
-                PrepareTagsAndLayers(options, out string forkliftTag, out string cubeTag, out string zoneTag, out string groundTag,
-                    out string buildingTag, out int groundLayer, out int cubeLayer);
+                PrepareTagsAndLayers(options, out string forkliftTag, out string cargoTag, out string zoneTag, out string groundTag,
+                    out string buildingTag, out int groundLayer, out int cargoLayer);
 
                 EditorUtility.DisplayProgressBar("Генерация демо-сцены", "Материалы...", 0.2f);
                 DemoMaterials materials = options.createMaterials ? CreateMaterials() : DemoMaterials.Empty;
@@ -395,7 +403,7 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 EditorUtility.DisplayProgressBar("Генерация демо-сцены", "Погрузчик...", 0.56f);
                 ForkliftController forkliftController;
                 Transform resetPoint;
-                GameObject forklift = BuildForklift(demoRoot.transform, scene, options, materials, chassisMaterial, groundLayer, cubeLayer,
+                GameObject forklift = BuildForklift(demoRoot.transform, scene, options, materials, chassisMaterial, groundLayer, cargoLayer,
                     out forkliftController, out resetPoint);
 
                 if (!string.IsNullOrEmpty(forkliftTag))
@@ -407,8 +415,8 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 Transform zoneParent = barn != null ? barn.transform : demoRoot.transform;
                 BuildSortingZones(zoneParent, scene, materials, zoneTag, options.createFarmBuildings);
 
-                EditorUtility.DisplayProgressBar("Генерация демо-сцены", "Кубики на улице...", 0.8f);
-                BuildCubes(demoRoot.transform, scene, options, materials, cubeLayer, cubeTag);
+                EditorUtility.DisplayProgressBar("Генерация демо-сцены", "Паллеты с грузом на улице...", 0.8f);
+                BuildPallets(demoRoot.transform, scene, options, materials, cargoLayer, cargoTag);
 
                 EditorUtility.DisplayProgressBar("Генерация демо-сцены", "GameManager...", 0.88f);
                 BuildGameManager(demoRoot.transform, scene);
@@ -448,10 +456,10 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 }
 
                 Debug.Log(string.Format(
-                    "[DemoSceneGenerator] Уровень готов: ферма с домом и амбаром, погрузчик, 3 зоны сортировки внутри амбара, {0} кубиков на улице{1}. " +
-                    "Задача: подобрать кубики вилами на улице и развезти по цветным зонам в амбаре. " +
-                    "Управление: W/S — газ, A/D — руль, Shift/Ctrl — вилы, Q/E — наклон мачты, Space — тормоз, R — сброс.",
-                    options.cubesPerColor * 3,
+                    "[DemoSceneGenerator] Уровень готов: ферма с домом и амбаром, погрузчик, 3 зоны сортировки внутри амбара, {0} паллет с грузом на улице{1}. " +
+                    "Задача: подобрать паллеты вилами (F — захват/отпускание) и развезти по зонам в амбаре: ящики, бочки, стройматериалы. " +
+                    "Управление: W/S — газ, A/D — руль, Shift/Ctrl — вилы, Q/E — наклон мачты, F — захват/отпустить груз, Space — тормоз, R — сброс.",
+                    options.palletsPerType * 3,
                     options.createHud ? ", HUD со счётом" : string.Empty));
             }
             catch (Exception exception)
@@ -466,14 +474,14 @@ namespace KakayatoBurmalda.Forklift.EditorTools
         }
 
         /// <summary>
-        /// Самопроверка после генерации: считаем кубики и зоны, убеждаемся, что зоны стоят внутри амбара,
-        /// а ссылки погрузчика назначены. Итог уходит в консоль, поэтому «одна кнопка» либо собирает
-        /// корректный уровень, либо честно сообщает, что именно не так.
+        /// Самопроверка после генерации: считаем паллеты по типам груза и зоны, убеждаемся, что зоны
+        /// стоят внутри амбара, а ссылки погрузчика и камеры назначены. Итог уходит в консоль, поэтому
+        /// «одна кнопка» либо собирает корректный уровень, либо честно сообщает, что именно не так.
         /// </summary>
         private static void ValidateGeneratedScene(Scene scene, GenerationOptions options, ForkliftController forklift, GameObject house, GameObject barn)
         {
             List<string> issues = new List<string>();
-            int expectedCubes = Mathf.Clamp(options.cubesPerColor, 1, 6) * 3;
+            int expectedPallets = Mathf.Clamp(options.palletsPerType, 1, 4) * 3;
 
             // 1. Погрузчик и его ссылки.
             if (forklift == null)
@@ -493,27 +501,32 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 }
             }
 
-            // 2. Кубики по цветам.
-            CubeProperty[] cubes = UnityEngine.Object.FindObjectsOfType<CubeProperty>();
-            int[] cubesByColor = new int[4];
+            // 2. Паллеты с грузом по типам.
+            CargoPallet[] pallets = UnityEngine.Object.FindObjectsOfType<CargoPallet>();
+            int[] palletsByType = new int[4];
 
-            for (int i = 0; i < cubes.Length; i++)
+            for (int i = 0; i < pallets.Length; i++)
             {
-                int colorIndex = Mathf.Clamp((int)cubes[i].CubeType, 0, cubesByColor.Length - 1);
-                cubesByColor[colorIndex]++;
+                int typeIndex = Mathf.Clamp((int)pallets[i].Cargo, 0, palletsByType.Length - 1);
+                palletsByType[typeIndex]++;
 
-                if (cubes[i].CubeType == CubeColor.None)
+                if (pallets[i].Cargo == CargoType.None)
                 {
-                    issues.Add("кубик «" + cubes[i].name + "» без типа (None) — в зонах не засчитается");
+                    issues.Add("паллета «" + pallets[i].name + "» без типа груза (None) — в зонах не засчитается");
+                }
+
+                if (pallets[i].Body == null)
+                {
+                    issues.Add("у паллеты «" + pallets[i].name + "» нет Rigidbody");
                 }
             }
 
-            if (cubes.Length != expectedCubes)
+            if (pallets.Length != expectedPallets)
             {
-                issues.Add(string.Format("кубиков в сцене {0}, ожидалось {1}", cubes.Length, expectedCubes));
+                issues.Add(string.Format("паллет в сцене {0}, ожидалось {1}", pallets.Length, expectedPallets));
             }
 
-            // 3. Зоны сортировки: три штуки и все внутри амбара.
+            // 3. Зоны сортировки: три штуки, у каждой свой тип груза, все внутри амбара.
             SortingZone[] zones = UnityEngine.Object.FindObjectsOfType<SortingZone>();
 
             if (zones.Length != 3)
@@ -521,11 +534,17 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 issues.Add(string.Format("зон сортировки {0}, ожидалось 3", zones.Length));
             }
 
+            int[] zoneTypes = new int[4];
+
             for (int i = 0; i < zones.Length; i++)
             {
-                if (zones[i].TargetType == CubeColor.None)
+                if (zones[i].TargetType == CargoType.None)
                 {
-                    issues.Add("у зоны " + zones[i].name + " не задан целевой тип");
+                    issues.Add("у зоны " + zones[i].name + " не задан целевой тип груза");
+                }
+                else
+                {
+                    zoneTypes[Mathf.Clamp((int)zones[i].TargetType, 0, zoneTypes.Length - 1)]++;
                 }
 
                 if (barn != null)
@@ -541,7 +560,15 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 }
             }
 
-            // 4. Менеджер игры и слой земли.
+            for (int typeIndex = 1; typeIndex < zoneTypes.Length; typeIndex++)
+            {
+                if (zoneTypes[typeIndex] == 0)
+                {
+                    issues.Add("нет зоны сортировки для типа " + ((CargoType)typeIndex));
+                }
+            }
+
+            // 4. Менеджер игры, слои и следящая камера.
             if (UnityEngine.Object.FindObjectOfType<GameManager>() == null)
             {
                 issues.Add("на сцене нет GameManager — очки не будут считаться");
@@ -552,12 +579,17 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 issues.Add("нет слоя Ground — погрузчик будет считать землёй всю общую маску");
             }
 
+            if (options.attachCameraToForklift && UnityEngine.Object.FindObjectOfType<CameraFollow>() == null)
+            {
+                issues.Add("камера не получила CameraFollow — обзор не будет следовать за погрузчиком");
+            }
+
             string summary = string.Format(
-                "[DemoSceneGenerator] Проверка сцены: кубиков {0} (R:{1} G:{2} B:{3}), зон сортировки {4}, дом {5}, амбар {6}, HUD {7}.",
-                cubes.Length,
-                cubesByColor[0],
-                cubesByColor[1],
-                cubesByColor[2],
+                "[DemoSceneGenerator] Проверка сцены: паллет {0} (ящики {1}, бочки {2}, стройматериалы {3}), зон сортировки {4}, дом {5}, амбар {6}, HUD {7}.",
+                pallets.Length,
+                palletsByType[(int)CargoType.Boxes],
+                palletsByType[(int)CargoType.Barrels],
+                palletsByType[(int)CargoType.Construction],
                 zones.Length,
                 house != null ? "есть" : "нет",
                 barn != null ? "есть" : "нет",
@@ -648,25 +680,25 @@ namespace KakayatoBurmalda.Forklift.EditorTools
         private static void PrepareTagsAndLayers(
             GenerationOptions options,
             out string forkliftTag,
-            out string cubeTag,
+            out string cargoTag,
             out string zoneTag,
             out string groundTag,
             out string buildingTag,
             out int groundLayer,
-            out int cubeLayer)
+            out int cargoLayer)
         {
             forkliftTag = null;
-            cubeTag = null;
+            cargoTag = null;
             zoneTag = null;
             groundTag = null;
             buildingTag = null;
             groundLayer = 0;
-            cubeLayer = 0;
+            cargoLayer = 0;
 
             if (options.createTags)
             {
                 forkliftTag = EnsureTag("Forklift");
-                cubeTag = EnsureTag("Cube");
+                cargoTag = EnsureTag("Cargo");
                 zoneTag = EnsureTag("SortingZone");
                 groundTag = EnsureTag("Ground");
                 buildingTag = EnsureTag("Barn");
@@ -675,7 +707,7 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             if (options.createLayers)
             {
                 groundLayer = EnsureLayer("Ground");
-                cubeLayer = EnsureLayer("Cube");
+                cargoLayer = EnsureLayer("Cargo");
             }
         }
 
@@ -832,6 +864,11 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             return null;
         }
 
+        /// <summary>
+        /// Навесить на камеру слежение от третьего лица (<see cref="CameraFollow"/>).
+        /// Камера остаётся в корне сцены: её не трясёт физика погрузчика, а позицию и взгляд
+        /// ведёт CameraFollow (SmoothDamp по позиции, Slerp по взгляду).
+        /// </summary>
         private static void AttachCameraToForklift(Scene scene, Transform forklift)
         {
             Camera camera = FindActiveComponentInScene<Camera>(scene);
@@ -842,17 +879,38 @@ namespace KakayatoBurmalda.Forklift.EditorTools
 
             Transform cameraTransform = camera.transform;
 
-            Undo.SetTransformParent(cameraTransform, forklift, "Attach camera to forklift");
-            Undo.RecordObject(cameraTransform, "Attach camera to forklift");
+            // Камера не должна быть ребёнком погрузчика: иначе её трясёт вместе с корпусом.
+            if (cameraTransform.parent != null)
+            {
+                Undo.SetTransformParent(cameraTransform, null, "Detach camera from forklift");
+            }
 
-            // Камера сзади и выше: видно вилы впереди и проём амбара по курсу.
-            cameraTransform.localPosition = new Vector3(0f, 5.2f, -9f);
-            cameraTransform.localRotation = Quaternion.Euler(14f, 0f, 0f);
-            cameraTransform.localScale = Vector3.one;
+            CameraFollow follow = cameraTransform.GetComponent<CameraFollow>();
+
+            if (follow == null)
+            {
+                follow = Undo.AddComponent<CameraFollow>(cameraTransform);
+            }
+
+            ApplySerializedChanges(follow, serializedObject =>
+            {
+                SetObjectReference(serializedObject, "target", forklift);
+                SetVector3(serializedObject, "offset", new Vector3(0f, 4.6f, -8.6f));
+                SetFloat(serializedObject, "pivotHeight", 1.5f);
+                SetFloat(serializedObject, "positionSmoothTime", 0.3f);
+                SetFloat(serializedObject, "yawSmoothTime", 0.45f);
+                SetFloat(serializedObject, "rotationSharpness", 6f);
+                SetVector3(serializedObject, "lookOffset", new Vector3(0f, 1.3f, 1.8f));
+                SetFloat(serializedObject, "minHeight", 1.5f);
+                SetBool(serializedObject, "snapOnStart", true);
+            });
 
             camera.fieldOfView = 62f;
             camera.nearClipPlane = 0.1f;
             camera.farClipPlane = 500f;
+
+            // Сразу ставим камеру на место: кадр виден ещё до запуска игры.
+            follow.SnapToTarget();
         }
 
         #endregion
@@ -868,25 +926,36 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             public Material Ground;
             public Material Dirt;
 
-            // Погрузчик
+            // Погрузчик: крашеная сталь, тёмный металл, стекло, хром, резина, фара
             public Material ForkliftBody;
             public Material ForkliftAccent;
+            public Material ForkliftGlass;
+            public Material ForkliftChrome;
             public Material Wheel;
+            public Material WheelRim;
+            public Material Headlight;
 
-            // Зоны сортировки
-            public Material ZoneRed;
-            public Material ZoneGreen;
-            public Material ZoneBlue;
+            // Зоны сортировки (по типу груза)
+            public Material ZoneBoxes;
+            public Material ZoneBarrels;
+            public Material ZoneConstruction;
 
-            // Кубики
-            public Material CubeRed;
-            public Material CubeGreen;
-            public Material CubeBlue;
-            public Material CubeYellow;
+            // Паллеты и груз
+            public Material PalletWood;
+            public Material PalletWoodDark;
+            public Material Cardboard;
+            public Material Tape;
+            public Material BarrelMetal;
+            public Material BarrelHoop;
+            public Material Concrete;
+            public Material ConcreteDark;
 
             // Дом
             public Material HouseWall;
+            public Material HouseWallBrick;
             public Material HouseRoof;
+            public Material HouseRoofRidge;
+            public Material WindowFrame;
             public Material Window;
             public Material Wood;
             public Material WoodDark;
@@ -896,77 +965,93 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             public Material BarnWall;
             public Material BarnRoof;
             public Material BarnFrame;
+            public Material BarnDoorFrame;
             public Material BarnFloor;
             public Material Hay;
             public Material Warning;
 
-            /// <summary>Материал зоны по цвету кубика.</summary>
-            public Material GetZoneMaterial(CubeColor color)
+            /// <summary>Материал зоны по типу груза.</summary>
+            public Material GetZoneMaterial(CargoType cargoType)
             {
-                switch (color)
+                switch (cargoType)
                 {
-                    case CubeColor.Red: return ZoneRed;
-                    case CubeColor.Green: return ZoneGreen;
-                    case CubeColor.Blue: return ZoneBlue;
+                    case CargoType.Boxes: return ZoneBoxes;
+                    case CargoType.Barrels: return ZoneBarrels;
+                    case CargoType.Construction: return ZoneConstruction;
                     default: return null;
                 }
             }
 
-            /// <summary>Материал кубика по его цвету.</summary>
-            public Material GetCubeMaterial(CubeColor color)
+            /// <summary>Материал груза по типу — для значков зон и мелких деталей.</summary>
+            public Material GetCargoMaterial(CargoType cargoType)
             {
-                switch (color)
+                switch (cargoType)
                 {
-                    case CubeColor.Red: return CubeRed;
-                    case CubeColor.Green: return CubeGreen;
-                    case CubeColor.Blue: return CubeBlue;
-                    case CubeColor.Yellow: return CubeYellow;
+                    case CargoType.Boxes: return Cardboard;
+                    case CargoType.Barrels: return BarrelMetal;
+                    case CargoType.Construction: return Concrete;
                     default: return null;
                 }
             }
         }
 
+        /// <summary>
+        /// Материалы сцены. Для металла поднимаем metallic/smoothness (крашеный корпус, хром, обручи),
+        /// дерево, картон и бетон оставляем матовыми — так примитивы читаются как разные материалы.
+        /// </summary>
         private static DemoMaterials CreateMaterials()
         {
             EnsureFolder(MaterialsFolder);
 
             DemoMaterials materials = new DemoMaterials
             {
-                // Земля: трава и грунтовая дорога.
+                // Земля: трава и грунтовая дорога (матовые).
                 Ground = FindOrCreateMaterial("Demo_Ground", new Color(0.22f, 0.30f, 0.16f), 0.08f, 0f, false),
                 Dirt = FindOrCreateMaterial("Demo_Dirt", new Color(0.42f, 0.34f, 0.24f), 0.05f, 0f, false),
 
-                // Погрузчик: оранжевый корпус, графитовая мачта, чёрные шины.
-                ForkliftBody = FindOrCreateMaterial("Demo_Forklift_Body", new Color(0.95f, 0.55f, 0.08f), 0.45f, 0.2f, false),
-                ForkliftAccent = FindOrCreateMaterial("Demo_Forklift_Accent", new Color(0.16f, 0.16f, 0.17f), 0.5f, 0.6f, false),
-                Wheel = FindOrCreateMaterial("Demo_Wheel", new Color(0.06f, 0.06f, 0.07f), 0.25f, 0f, false),
+                // Погрузчик: оранжевая крашеная сталь, графитовый металл, стекло, хром, резина.
+                ForkliftBody = FindOrCreateMaterial("Demo_Forklift_Body", new Color(0.95f, 0.55f, 0.08f), 0.55f, 0.45f, false),
+                ForkliftAccent = FindOrCreateMaterial("Demo_Forklift_Accent", new Color(0.17f, 0.17f, 0.19f), 0.62f, 0.75f, false),
+                ForkliftGlass = FindOrCreateMaterial("Demo_Forklift_Glass", new Color(0.55f, 0.72f, 0.85f, 0.35f), 0.92f, 0.1f, true),
+                ForkliftChrome = FindOrCreateMaterial("Demo_Forklift_Chrome", new Color(0.78f, 0.79f, 0.82f), 0.85f, 0.95f, false),
+                Wheel = FindOrCreateMaterial("Demo_Wheel", new Color(0.05f, 0.05f, 0.06f), 0.12f, 0f, false),
+                WheelRim = FindOrCreateMaterial("Demo_Wheel_Rim", new Color(0.72f, 0.73f, 0.76f), 0.7f, 0.85f, false),
+                Headlight = FindOrCreateMaterial("Demo_Headlight", new Color(0.98f, 0.95f, 0.75f), 0.9f, 0.1f, false),
 
-                // Зоны сортировки: полупрозрачные цветные площадки.
-                ZoneRed = FindOrCreateMaterial("Demo_Zone_Red", new Color(0.85f, 0.18f, 0.16f, 0.6f), 0.2f, 0f, true),
-                ZoneGreen = FindOrCreateMaterial("Demo_Zone_Green", new Color(0.20f, 0.72f, 0.24f, 0.6f), 0.2f, 0f, true),
-                ZoneBlue = FindOrCreateMaterial("Demo_Zone_Blue", new Color(0.16f, 0.42f, 0.85f, 0.6f), 0.2f, 0f, true),
+                // Зоны сортировки: полупрозрачные площадки по типу груза.
+                ZoneBoxes = FindOrCreateMaterial("Demo_Zone_Boxes", new Color(0.86f, 0.66f, 0.34f, 0.55f), 0.15f, 0f, true),
+                ZoneBarrels = FindOrCreateMaterial("Demo_Zone_Barrels", new Color(0.24f, 0.52f, 0.86f, 0.55f), 0.25f, 0.2f, true),
+                ZoneConstruction = FindOrCreateMaterial("Demo_Zone_Construction", new Color(0.92f, 0.50f, 0.14f, 0.55f), 0.2f, 0f, true),
 
-                // Кубики.
-                CubeRed = FindOrCreateMaterial("Demo_Cube_Red", new Color(0.85f, 0.18f, 0.16f), 0.35f, 0f, false),
-                CubeGreen = FindOrCreateMaterial("Demo_Cube_Green", new Color(0.20f, 0.72f, 0.24f), 0.35f, 0f, false),
-                CubeBlue = FindOrCreateMaterial("Demo_Cube_Blue", new Color(0.16f, 0.42f, 0.85f), 0.35f, 0f, false),
-                CubeYellow = FindOrCreateMaterial("Demo_Cube_Yellow", new Color(0.95f, 0.80f, 0.15f), 0.35f, 0f, false),
+                // Паллеты и груз: дерево, картон, стальные бочки, бетон.
+                PalletWood = FindOrCreateMaterial("Demo_Pallet_Wood", new Color(0.62f, 0.46f, 0.26f), 0.16f, 0f, false),
+                PalletWoodDark = FindOrCreateMaterial("Demo_Pallet_Wood_Dark", new Color(0.42f, 0.30f, 0.17f), 0.14f, 0f, false),
+                Cardboard = FindOrCreateMaterial("Demo_Cardboard", new Color(0.72f, 0.55f, 0.34f), 0.05f, 0f, false),
+                Tape = FindOrCreateMaterial("Demo_Tape", new Color(0.35f, 0.26f, 0.16f), 0.08f, 0f, false),
+                BarrelMetal = FindOrCreateMaterial("Demo_Barrel_Metal", new Color(0.30f, 0.45f, 0.62f), 0.5f, 0.65f, false),
+                BarrelHoop = FindOrCreateMaterial("Demo_Barrel_Hoop", new Color(0.66f, 0.66f, 0.70f), 0.75f, 0.9f, false),
+                Concrete = FindOrCreateMaterial("Demo_Concrete", new Color(0.66f, 0.66f, 0.64f), 0.08f, 0f, false),
+                ConcreteDark = FindOrCreateMaterial("Demo_Concrete_Dark", new Color(0.45f, 0.45f, 0.44f), 0.07f, 0f, false),
 
-                // Дом: светлая штукатурка, тёмно-красная черепица, дерево, камень, окна.
-                HouseWall = FindOrCreateMaterial("Demo_House_Wall", new Color(0.88f, 0.84f, 0.74f), 0.15f, 0f, false),
-                HouseRoof = FindOrCreateMaterial("Demo_House_Roof", new Color(0.42f, 0.16f, 0.13f), 0.2f, 0f, false),
-                Window = FindOrCreateMaterial("Demo_Window", new Color(0.45f, 0.68f, 0.82f), 0.85f, 0.1f, false),
-                Wood = FindOrCreateMaterial("Demo_Wood", new Color(0.45f, 0.30f, 0.16f), 0.2f, 0f, false),
-                WoodDark = FindOrCreateMaterial("Demo_Wood_Dark", new Color(0.26f, 0.16f, 0.09f), 0.2f, 0f, false),
-                Stone = FindOrCreateMaterial("Demo_Stone", new Color(0.42f, 0.41f, 0.40f), 0.1f, 0f, false),
+                // Дом: штукатурка и кирпич матовые, черепица чуть блестит, окна — стекло в белой раме.
+                HouseWall = FindOrCreateMaterial("Demo_House_Wall", new Color(0.90f, 0.86f, 0.76f), 0.07f, 0f, false),
+                HouseWallBrick = FindOrCreateMaterial("Demo_House_Brick", new Color(0.56f, 0.28f, 0.21f), 0.08f, 0f, false),
+                HouseRoof = FindOrCreateMaterial("Demo_House_Roof", new Color(0.45f, 0.17f, 0.13f), 0.24f, 0.05f, false),
+                HouseRoofRidge = FindOrCreateMaterial("Demo_House_Roof_Ridge", new Color(0.28f, 0.12f, 0.10f), 0.2f, 0f, false),
+                WindowFrame = FindOrCreateMaterial("Demo_Window_Frame", new Color(0.92f, 0.92f, 0.88f), 0.25f, 0f, false),
+                Window = FindOrCreateMaterial("Demo_Window", new Color(0.45f, 0.68f, 0.82f, 0.45f), 0.92f, 0.12f, true),
+                Wood = FindOrCreateMaterial("Demo_Wood", new Color(0.45f, 0.30f, 0.16f), 0.16f, 0f, false),
+                WoodDark = FindOrCreateMaterial("Demo_Wood_Dark", new Color(0.26f, 0.16f, 0.09f), 0.14f, 0f, false),
+                Stone = FindOrCreateMaterial("Demo_Stone", new Color(0.45f, 0.44f, 0.42f), 0.09f, 0f, false),
 
-                // Амбар: классический красный, тёмная крыша, деревянный каркас, сено, конусы.
-                BarnWall = FindOrCreateMaterial("Demo_Barn_Wall", new Color(0.62f, 0.16f, 0.12f), 0.12f, 0f, false),
-                BarnRoof = FindOrCreateMaterial("Demo_Barn_Roof", new Color(0.24f, 0.24f, 0.26f), 0.25f, 0.1f, false),
+                // Амбар: крашеная доска, тёмная металлическая крыша, деревянный каркас, сено, конусы.
+                BarnWall = FindOrCreateMaterial("Demo_Barn_Wall", new Color(0.60f, 0.17f, 0.13f), 0.18f, 0.03f, false),
+                BarnRoof = FindOrCreateMaterial("Demo_Barn_Roof", new Color(0.25f, 0.25f, 0.27f), 0.35f, 0.55f, false),
                 BarnFrame = FindOrCreateMaterial("Demo_Barn_Frame", new Color(0.34f, 0.24f, 0.15f), 0.15f, 0f, false),
+                BarnDoorFrame = FindOrCreateMaterial("Demo_Barn_Door_Frame", new Color(0.28f, 0.19f, 0.11f), 0.14f, 0f, false),
                 BarnFloor = FindOrCreateMaterial("Demo_Barn_Floor", new Color(0.48f, 0.44f, 0.38f), 0.08f, 0f, false),
                 Hay = FindOrCreateMaterial("Demo_Hay", new Color(0.86f, 0.72f, 0.28f), 0.05f, 0f, false),
-                Warning = FindOrCreateMaterial("Demo_Warning", new Color(0.95f, 0.42f, 0.05f), 0.3f, 0f, false)
+                Warning = FindOrCreateMaterial("Demo_Warning", new Color(0.95f, 0.42f, 0.05f), 0.25f, 0f, false)
             };
 
             AssetDatabase.SaveAssets();
@@ -1192,6 +1277,72 @@ namespace KakayatoBurmalda.Forklift.EditorTools
         /// Фермерский дом из примитивов: коробка стен (один коллайдер на всё здание),
         /// двускатная крыша, труба, дверь, окна, крыльцо и бочки. Стоит слева от старта.
         /// </summary>
+        /// <summary>
+        /// Окно: стекло + рама из четырёх брусков, стойка-переплёт и подоконник.
+        /// Так окно читается как проём в стене, а не как цветной квадрат.
+        /// </summary>
+        private static void BuildWindow(Transform parent, Scene scene, DemoMaterials materials, string objectName,
+            Vector3 localPosition, float width, float height, bool thinAlongX)
+        {
+            const float glassDepth = 0.14f;
+            const float bar = 0.1f;
+
+            GameObject glass = CreateDecorPrimitive(objectName + "_Glass", PrimitiveType.Cube, parent, scene, localPosition, Quaternion.identity);
+            glass.transform.localScale = thinAlongX
+                ? new Vector3(glassDepth, height, width)
+                : new Vector3(width, height, glassDepth);
+            ApplyMaterial(glass, materials.Window);
+
+            // Верхний и нижний бруски + боковые стойки.
+            Vector3 horizontalScale = thinAlongX
+                ? new Vector3(glassDepth + 0.05f, bar, width + bar * 2f)
+                : new Vector3(width + bar * 2f, bar, glassDepth + 0.05f);
+
+            Vector3 verticalScale = thinAlongX
+                ? new Vector3(glassDepth + 0.05f, height + bar, bar)
+                : new Vector3(bar, height + bar, glassDepth + 0.05f);
+
+            GameObject topBar = CreateDecorPrimitive(objectName + "_FrameTop", PrimitiveType.Cube, parent, scene,
+                localPosition + new Vector3(0f, height * 0.5f, 0f), Quaternion.identity);
+            topBar.transform.localScale = horizontalScale;
+            ApplyMaterial(topBar, materials.WindowFrame);
+
+            GameObject bottomBar = CreateDecorPrimitive(objectName + "_FrameBottom", PrimitiveType.Cube, parent, scene,
+                localPosition + new Vector3(0f, -height * 0.5f, 0f), Quaternion.identity);
+            bottomBar.transform.localScale = horizontalScale;
+            ApplyMaterial(bottomBar, materials.WindowFrame);
+
+            for (int side = -1; side <= 1; side += 2)
+            {
+                Vector3 offset = thinAlongX
+                    ? new Vector3(0f, 0f, side * width * 0.5f)
+                    : new Vector3(side * width * 0.5f, 0f, 0f);
+
+                GameObject post = CreateDecorPrimitive(objectName + "_Frame_" + (side > 0 ? "R" : "L"), PrimitiveType.Cube, parent, scene,
+                    localPosition + offset, Quaternion.identity);
+                post.transform.localScale = verticalScale;
+                ApplyMaterial(post, materials.WindowFrame);
+            }
+
+            // Переплёт посередине: делит стекло на две створки.
+            GameObject mullion = CreateDecorPrimitive(objectName + "_Frame_Mid", PrimitiveType.Cube, parent, scene, localPosition, Quaternion.identity);
+            mullion.transform.localScale = thinAlongX
+                ? new Vector3(glassDepth + 0.05f, height, bar * 0.7f)
+                : new Vector3(bar * 0.7f, height, glassDepth + 0.05f);
+            ApplyMaterial(mullion, materials.WindowFrame);
+
+            // Подоконник.
+            Vector3 sillOffset = thinAlongX
+                ? new Vector3(0f, -height * 0.5f - 0.09f, 0f)
+                : new Vector3(0f, -height * 0.5f - 0.09f, 0f);
+
+            GameObject sill = CreateDecorPrimitive(objectName + "_Sill", PrimitiveType.Cube, parent, scene, localPosition + sillOffset, Quaternion.identity);
+            sill.transform.localScale = thinAlongX
+                ? new Vector3(glassDepth + 0.28f, 0.09f, width + 0.36f)
+                : new Vector3(width + 0.36f, 0.09f, glassDepth + 0.28f);
+            ApplyMaterial(sill, materials.Wood);
+        }
+
         private static GameObject BuildHouse(Transform parent, Scene scene, DemoMaterials materials)
         {
             GameObject house = CreateGameObject("House", parent, scene, HousePosition, Quaternion.identity);
@@ -1205,6 +1356,26 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 new Vector3(0f, HouseWallHeight * 0.5f, 0f), Quaternion.identity);
             walls.transform.localScale = new Vector3(HouseWidth, HouseWallHeight, HouseDepth);
             ApplyMaterial(walls, materials.HouseWall);
+
+            // Кирпичный поясок по низу и угловые брёвна: дом перестаёт быть однотонным кубом.
+            GameObject brickBand = CreateDecorPrimitive("BrickBand", PrimitiveType.Cube, house.transform, scene,
+                new Vector3(0f, 0.42f, 0f), Quaternion.identity);
+            brickBand.transform.localScale = new Vector3(HouseWidth + 0.06f, 0.45f, HouseDepth + 0.06f);
+            ApplyMaterial(brickBand, materials.HouseWallBrick);
+
+            for (int cornerX = -1; cornerX <= 1; cornerX += 2)
+            {
+                for (int cornerZ = -1; cornerZ <= 1; cornerZ += 2)
+                {
+                    GameObject cornerBeam = CreateDecorPrimitive(
+                        string.Format("CornerBeam_{0}{1}", cornerX > 0 ? "R" : "L", cornerZ > 0 ? "B" : "F"),
+                        PrimitiveType.Cube, house.transform, scene,
+                        new Vector3(cornerX * (HouseWidth * 0.5f - 0.1f), HouseWallHeight * 0.5f, cornerZ * (HouseDepth * 0.5f - 0.1f)),
+                        Quaternion.identity);
+                    cornerBeam.transform.localScale = new Vector3(0.3f, HouseWallHeight, 0.3f);
+                    ApplyMaterial(cornerBeam, materials.Wood);
+                }
+            }
 
             GameObject foundation = CreateDecorPrimitive("Foundation", PrimitiveType.Cube, house.transform, scene,
                 new Vector3(0f, 0.12f, 0f), Quaternion.identity);
@@ -1227,6 +1398,20 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             roofFront.transform.localScale = new Vector3(HouseWidth + 1f, 0.25f, roofSlope);
             ApplyMaterial(roofFront, materials.HouseRoof);
 
+            // Конёк и подшивка свесов — крыша выглядит собранной, а не двумя одинаковыми плитами.
+            GameObject houseRidge = CreateDecorPrimitive("Roof_Ridge", PrimitiveType.Cube, house.transform, scene,
+                new Vector3(0f, HouseWallHeight + HouseRoofHeight + 0.02f, 0f), Quaternion.identity);
+            houseRidge.transform.localScale = new Vector3(HouseWidth + 1.2f, 0.24f, 0.55f);
+            ApplyMaterial(houseRidge, materials.HouseRoofRidge);
+
+            for (int eaveSide = -1; eaveSide <= 1; eaveSide += 2)
+            {
+                GameObject eave = CreateDecorPrimitive("Roof_Eave_" + (eaveSide > 0 ? "Back" : "Front"), PrimitiveType.Cube, house.transform, scene,
+                    new Vector3(0f, HouseWallHeight - 0.06f, eaveSide * (HouseDepth * 0.5f + 0.55f)), Quaternion.identity);
+                eave.transform.localScale = new Vector3(HouseWidth + 1.3f, 0.18f, 0.5f);
+                ApplyMaterial(eave, materials.WoodDark);
+            }
+
             GameObject chimney = CreateDecorPrimitive("Chimney", PrimitiveType.Cube, house.transform, scene,
                 new Vector3(HouseWidth * 0.25f, HouseWallHeight + HouseRoofHeight + 0.6f, -1f), Quaternion.identity);
             chimney.transform.localScale = new Vector3(0.9f, 2.6f, 0.9f);
@@ -1238,39 +1423,42 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             door.transform.localScale = new Vector3(1.4f, HouseWallHeight * 0.62f, 0.12f);
             ApplyMaterial(door, materials.WoodDark);
 
+            // Дверная рама: стойки, перекладина и козырёк над крыльцом.
+            float houseDoorHeight = HouseWallHeight * 0.62f;
+
+            for (int side = -1; side <= 1; side += 2)
+            {
+                GameObject doorPost = CreateDecorPrimitive("DoorFrame_Post_" + (side > 0 ? "R" : "L"), PrimitiveType.Cube, house.transform, scene,
+                    new Vector3(side * 0.82f, houseDoorHeight * 0.5f, HouseDepth * 0.5f + 0.06f), Quaternion.identity);
+                doorPost.transform.localScale = new Vector3(0.22f, houseDoorHeight + 0.25f, 0.2f);
+                ApplyMaterial(doorPost, materials.WindowFrame);
+            }
+
+            GameObject doorLintel = CreateDecorPrimitive("DoorFrame_Lintel", PrimitiveType.Cube, house.transform, scene,
+                new Vector3(0f, houseDoorHeight + 0.16f, HouseDepth * 0.5f + 0.06f), Quaternion.identity);
+            doorLintel.transform.localScale = new Vector3(1.9f, 0.22f, 0.22f);
+            ApplyMaterial(doorLintel, materials.WindowFrame);
+
+            GameObject doorCanopy = CreateDecorPrimitive("DoorCanopy", PrimitiveType.Cube, house.transform, scene,
+                new Vector3(0f, houseDoorHeight + 0.45f, HouseDepth * 0.5f + 0.65f), Quaternion.Euler(-12f, 0f, 0f));
+            doorCanopy.transform.localScale = new Vector3(2.2f, 0.12f, 1.4f);
+            ApplyMaterial(doorCanopy, materials.HouseRoof);
+
             GameObject porch = CreateDecorPrimitive("Porch", PrimitiveType.Cube, house.transform, scene,
                 new Vector3(0f, 0.1f, HouseDepth * 0.5f + 0.9f), Quaternion.identity);
             porch.transform.localScale = new Vector3(3.2f, 0.2f, 1.8f);
             ApplyMaterial(porch, materials.Wood);
 
-            // Окна: два на фасаде и два на боковой стене.
-            Vector3[] frontWindows =
-            {
-                new Vector3(-3.2f, HouseWallHeight * 0.58f, HouseDepth * 0.5f + 0.03f),
-                new Vector3(3.2f, HouseWallHeight * 0.58f, HouseDepth * 0.5f + 0.03f)
-            };
-
-            for (int i = 0; i < frontWindows.Length; i++)
-            {
-                GameObject window = CreateDecorPrimitive("Window_Front_" + (i + 1), PrimitiveType.Cube, house.transform, scene,
-                    frontWindows[i], Quaternion.identity);
-                window.transform.localScale = new Vector3(1.8f, 1.3f, 0.12f);
-                ApplyMaterial(window, materials.Window);
-            }
-
-            Vector3[] sideWindows =
-            {
-                new Vector3(HouseWidth * 0.5f + 0.03f, HouseWallHeight * 0.58f, -1.8f),
-                new Vector3(HouseWidth * 0.5f + 0.03f, HouseWallHeight * 0.58f, 1.8f)
-            };
-
-            for (int i = 0; i < sideWindows.Length; i++)
-            {
-                GameObject window = CreateDecorPrimitive("Window_Side_" + (i + 1), PrimitiveType.Cube, house.transform, scene,
-                    sideWindows[i], Quaternion.identity);
-                window.transform.localScale = new Vector3(0.12f, 1.3f, 1.8f);
-                ApplyMaterial(window, materials.Window);
-            }
+            // Окна: два на фасаде и два на боковой стене — стекло в раме с переплётом и подоконником.
+            float houseWindowY = HouseWallHeight * 0.58f;
+            BuildWindow(house.transform, scene, materials, "Window_Front_1",
+                new Vector3(-3.2f, houseWindowY, HouseDepth * 0.5f + 0.01f), 1.8f, 1.3f, false);
+            BuildWindow(house.transform, scene, materials, "Window_Front_2",
+                new Vector3(3.2f, houseWindowY, HouseDepth * 0.5f + 0.01f), 1.8f, 1.3f, false);
+            BuildWindow(house.transform, scene, materials, "Window_Side_1",
+                new Vector3(HouseWidth * 0.5f + 0.01f, houseWindowY, -1.8f), 1.8f, 1.3f, true);
+            BuildWindow(house.transform, scene, materials, "Window_Side_2",
+                new Vector3(HouseWidth * 0.5f + 0.01f, houseWindowY, 1.8f), 1.8f, 1.3f, true);
 
             // Бочки во дворе — мелкий декор.
             for (int i = 0; i < 2; i++)
@@ -1340,6 +1528,47 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 new Vector3(0f, BarnHeight - headerHeight * 0.5f, -halfDepth + halfWall),
                 new Vector3(BarnOpeningWidth, headerHeight, wallThickness));
 
+            // Дверная рама въезда: стойки, перекладина и табличка над проёмом.
+            for (int side = -1; side <= 1; side += 2)
+            {
+                GameObject openingPost = CreateDecorPrimitive("DoorFrame_Post_" + (side > 0 ? "R" : "L"), PrimitiveType.Cube, barn.transform, scene,
+                    new Vector3(side * (BarnOpeningWidth * 0.5f + 0.22f), BarnOpeningHeight * 0.5f, -halfDepth + halfWall), Quaternion.identity);
+                openingPost.transform.localScale = new Vector3(0.4f, BarnOpeningHeight, 0.6f);
+                ApplyMaterial(openingPost, materials.BarnDoorFrame);
+            }
+
+            GameObject openingLintel = CreateDecorPrimitive("DoorFrame_Lintel", PrimitiveType.Cube, barn.transform, scene,
+                new Vector3(0f, BarnOpeningHeight + 0.22f, -halfDepth + halfWall), Quaternion.identity);
+            openingLintel.transform.localScale = new Vector3(BarnOpeningWidth + 0.85f, 0.45f, 0.6f);
+            ApplyMaterial(openingLintel, materials.BarnDoorFrame);
+
+            GameObject barnSign = CreateDecorPrimitive("Sign_Plate", PrimitiveType.Cube, barn.transform, scene,
+                new Vector3(0f, BarnOpeningHeight + 0.95f, -halfDepth - 0.07f), Quaternion.identity);
+            barnSign.transform.localScale = new Vector3(3.4f, 0.7f, 0.12f);
+            ApplyMaterial(barnSign, materials.Warning);
+
+            // Вертикальная обшивка боковых стен и наискось поставленные укосины спереди.
+            for (int side = -1; side <= 1; side += 2)
+            {
+                for (int i = 0; i < 3; i++)
+                {
+                    float slatZ = -halfDepth + 2.6f + i * 5.6f;
+                    GameObject slat = CreateDecorPrimitive("WallSlat_" + (side > 0 ? "R" : "L") + "_" + (i + 1), PrimitiveType.Cube, barn.transform, scene,
+                        new Vector3(side * (halfWidth - wallThickness - 0.07f), BarnHeight * 0.5f, slatZ), Quaternion.identity);
+                    slat.transform.localScale = new Vector3(0.14f, BarnHeight, 0.3f);
+                    ApplyMaterial(slat, materials.BarnFrame);
+                }
+            }
+
+            for (int side = -1; side <= 1; side += 2)
+            {
+                float segmentCenterX = side * (BarnOpeningWidth * 0.5f + sideSegmentWidth * 0.5f);
+                GameObject brace = CreateDecorPrimitive("FrontBrace_" + (side > 0 ? "R" : "L"), PrimitiveType.Cube, barn.transform, scene,
+                    new Vector3(segmentCenterX, BarnHeight * 0.5f, -halfDepth - 0.03f), Quaternion.Euler(0f, 0f, side * 32f));
+                brace.transform.localScale = new Vector3(0.22f, Mathf.Sqrt(sideSegmentWidth * sideSegmentWidth + BarnHeight * BarnHeight) * 0.92f, 0.16f);
+                ApplyMaterial(brace, materials.BarnFrame);
+            }
+
             // Двускатная крыша вокруг конька по оси X (декор: погрузчик до неё не достаёт).
             float roofHalfSpan = halfDepth + 0.9f;
             float roofSlope = Mathf.Sqrt(roofHalfSpan * roofHalfSpan + BarnGableHeight * BarnGableHeight);
@@ -1361,6 +1590,14 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             ridge.transform.localScale = new Vector3(BarnWidth + 1.6f, 0.35f, 0.5f);
             ApplyMaterial(ridge, materials.BarnFrame);
 
+            for (int eaveSide = -1; eaveSide <= 1; eaveSide += 2)
+            {
+                GameObject eave = CreateDecorPrimitive("Eave_" + (eaveSide > 0 ? "Back" : "Front"), PrimitiveType.Cube, barn.transform, scene,
+                    new Vector3(0f, BarnHeight - 0.12f, eaveSide * (halfDepth + 0.75f)), Quaternion.identity);
+                eave.transform.localScale = new Vector3(BarnWidth + 1.9f, 0.22f, 0.55f);
+                ApplyMaterial(eave, materials.BarnFrame);
+            }
+
             // Деревянные стойки и балка внутри — визуальный каркас амбара.
             for (int i = -1; i <= 1; i += 2)
             {
@@ -1374,6 +1611,20 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 new Vector3(0f, BarnHeight - 0.6f, 0f), Quaternion.identity);
             beam.transform.localScale = new Vector3(BarnWidth - wallThickness * 2f, 0.35f, 0.35f);
             ApplyMaterial(beam, materials.BarnFrame);
+
+            // Вторая балка и средние стойки: внутри амбара читается каркас.
+            GameObject midBeam = CreateDecorPrimitive("Beam_Mid", PrimitiveType.Cube, barn.transform, scene,
+                new Vector3(0f, BarnHeight - 0.6f, halfDepth * 0.35f), Quaternion.identity);
+            midBeam.transform.localScale = new Vector3(BarnWidth - wallThickness * 2f, 0.28f, 0.28f);
+            ApplyMaterial(midBeam, materials.BarnFrame);
+
+            for (int side = -1; side <= 1; side += 2)
+            {
+                GameObject midPost = CreateDecorPrimitive("Post_Mid_" + (side > 0 ? "Right" : "Left"), PrimitiveType.Cube, barn.transform, scene,
+                    new Vector3(side * (halfWidth - 1.2f), BarnHeight * 0.5f - 0.4f, halfDepth * 0.35f), Quaternion.identity);
+                midPost.transform.localScale = new Vector3(0.26f, BarnHeight - 0.8f, 0.26f);
+                ApplyMaterial(midPost, materials.BarnFrame);
+            }
 
             // Сено в углу.
             for (int i = 0; i < 3; i++)
@@ -1420,7 +1671,7 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             DemoMaterials materials,
             PhysicMaterial chassisMaterial,
             int groundLayer,
-            int cubeLayer,
+            int cargoLayer,
             out ForkliftController forkliftController,
             out Transform resetPoint)
         {
@@ -1455,17 +1706,108 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             bodyMesh.transform.localScale = new Vector3(1.5f, 1.4f, 2.3f);
             ApplyMaterial(bodyMesh, materials.ForkliftBody);
 
+            // Задний противовес, топливный бак с хомутами и выхлопная труба.
+            GameObject counterweight = CreateDecorPrimitive("Counterweight", PrimitiveType.Cube, forklift.transform, scene, new Vector3(0f, 0.72f, -1.3f), Quaternion.identity);
+            counterweight.transform.localScale = new Vector3(1.4f, 1.0f, 0.55f);
+            ApplyMaterial(counterweight, materials.ForkliftAccent);
+
+            GameObject rearTank = CreateDecorPrimitive("RearTank", PrimitiveType.Cylinder, forklift.transform, scene, new Vector3(0f, 1.55f, -1.3f), Quaternion.Euler(90f, 0f, 0f));
+            rearTank.transform.localScale = new Vector3(0.75f, 0.42f, 0.75f);
+            ApplyMaterial(rearTank, materials.ForkliftChrome);
+
+            GameObject tankCap = CreateDecorPrimitive("RearTankCap", PrimitiveType.Cylinder, forklift.transform, scene, new Vector3(0.32f, 1.92f, -1.3f), Quaternion.identity);
+            tankCap.transform.localScale = new Vector3(0.18f, 0.06f, 0.18f);
+            ApplyMaterial(tankCap, materials.ForkliftAccent);
+
+            for (int strapSide = -1; strapSide <= 1; strapSide += 2)
+            {
+                GameObject tankStrap = CreateDecorPrimitive("RearTankStrap_" + (strapSide > 0 ? "R" : "L"), PrimitiveType.Cube, forklift.transform, scene,
+                    new Vector3(strapSide * 0.3f, 1.55f, -1.3f), Quaternion.identity);
+                tankStrap.transform.localScale = new Vector3(0.08f, 0.78f, 0.8f);
+                ApplyMaterial(tankStrap, materials.ForkliftAccent);
+            }
+
+            GameObject exhaust = CreateDecorPrimitive("Exhaust", PrimitiveType.Cylinder, forklift.transform, scene, new Vector3(0.55f, 2.2f, -1.05f), Quaternion.identity);
+            exhaust.transform.localScale = new Vector3(0.12f, 0.45f, 0.12f);
+            ApplyMaterial(exhaust, materials.ForkliftChrome);
+
+            // Кабина: коробка, остекление по трём сторонам и стойки.
             GameObject cabin = CreateDecorPrimitive("Cabin", PrimitiveType.Cube, forklift.transform, scene, new Vector3(0f, 2.05f, -0.55f), Quaternion.identity);
             cabin.transform.localScale = new Vector3(1.25f, 0.6f, 1.1f);
             ApplyMaterial(cabin, materials.ForkliftBody);
 
-            GameObject guard = CreateDecorPrimitive("OverheadGuard", PrimitiveType.Cube, forklift.transform, scene, new Vector3(0f, 2.42f, -0.55f), Quaternion.identity);
-            guard.transform.localScale = new Vector3(1.4f, 0.1f, 1.25f);
-            ApplyMaterial(guard, materials.ForkliftAccent);
+            GameObject cabinGlassFront = CreateDecorPrimitive("CabinGlass_Front", PrimitiveType.Cube, forklift.transform, scene, new Vector3(0f, 1.98f, 0.03f), Quaternion.identity);
+            cabinGlassFront.transform.localScale = new Vector3(1.05f, 0.52f, 0.06f);
+            ApplyMaterial(cabinGlassFront, materials.ForkliftGlass);
 
-            GameObject mast = CreateDecorPrimitive("Mast", PrimitiveType.Cube, forklift.transform, scene, new Vector3(0f, 1.5f, 1.2f), Quaternion.identity);
-            mast.transform.localScale = new Vector3(0.14f, 2.6f, 0.45f);
-            ApplyMaterial(mast, materials.ForkliftAccent);
+            for (int glassSide = -1; glassSide <= 1; glassSide += 2)
+            {
+                GameObject cabinGlass = CreateDecorPrimitive("CabinGlass_" + (glassSide > 0 ? "R" : "L"), PrimitiveType.Cube, forklift.transform, scene,
+                    new Vector3(glassSide * 0.64f, 1.98f, -0.55f), Quaternion.identity);
+                cabinGlass.transform.localScale = new Vector3(0.06f, 0.52f, 0.95f);
+                ApplyMaterial(cabinGlass, materials.ForkliftGlass);
+            }
+
+            for (int postX = -1; postX <= 1; postX += 2)
+            {
+                for (int postZ = -1; postZ <= 1; postZ += 2)
+                {
+                    GameObject cabinPost = CreateDecorPrimitive(
+                        string.Format("CabinPost_{0}{1}", postX > 0 ? "R" : "L", postZ > 0 ? "B" : "F"),
+                        PrimitiveType.Cube, forklift.transform, scene,
+                        new Vector3(postX * 0.6f, 2.1f, -0.55f + postZ * 0.52f), Quaternion.identity);
+                    cabinPost.transform.localScale = new Vector3(0.1f, 1.1f, 0.1f);
+                    ApplyMaterial(cabinPost, materials.ForkliftAccent);
+                }
+            }
+
+            // Защитная решётка над кабиной: рама и три продольных прута.
+            GameObject guardFrame = CreateDecorPrimitive("OverheadGuard", PrimitiveType.Cube, forklift.transform, scene, new Vector3(0f, 2.62f, -0.55f), Quaternion.identity);
+            guardFrame.transform.localScale = new Vector3(1.42f, 0.12f, 1.32f);
+            ApplyMaterial(guardFrame, materials.ForkliftAccent);
+
+            for (int guardBar = -1; guardBar <= 1; guardBar++)
+            {
+                GameObject bar = CreateDecorPrimitive("GuardBar_" + (guardBar + 2), PrimitiveType.Cube, forklift.transform, scene,
+                    new Vector3(guardBar * 0.45f, 2.55f, -0.55f), Quaternion.identity);
+                bar.transform.localScale = new Vector3(0.08f, 0.08f, 1.48f);
+                ApplyMaterial(bar, materials.ForkliftChrome);
+            }
+
+            // Фары спереди (на мачте) и габаритный огонь сзади.
+            for (int headSide = -1; headSide <= 1; headSide += 2)
+            {
+                GameObject headlight = CreateDecorPrimitive("Headlight_" + (headSide > 0 ? "R" : "L"), PrimitiveType.Sphere, forklift.transform, scene,
+                    new Vector3(headSide * 0.45f, 2.34f, 1.32f), Quaternion.identity);
+                headlight.transform.localScale = Vector3.one * 0.22f;
+                ApplyMaterial(headlight, materials.Headlight);
+            }
+
+            GameObject rearLight = CreateDecorPrimitive("RearLight", PrimitiveType.Cube, forklift.transform, scene, new Vector3(0f, 2.48f, -1.18f), Quaternion.identity);
+            rearLight.transform.localScale = new Vector3(0.5f, 0.16f, 0.1f);
+            ApplyMaterial(rearLight, materials.Warning);
+
+            // Мачта: две направляющие, поперечины и гидроцилиндры.
+            for (int mastSide = -1; mastSide <= 1; mastSide += 2)
+            {
+                GameObject mastRail = CreateDecorPrimitive("MastRail_" + (mastSide > 0 ? "R" : "L"), PrimitiveType.Cube, forklift.transform, scene,
+                    new Vector3(mastSide * 0.52f, 1.5f, 1.2f), Quaternion.identity);
+                mastRail.transform.localScale = new Vector3(0.16f, 2.6f, 0.32f);
+                ApplyMaterial(mastRail, materials.ForkliftAccent);
+
+                GameObject mastCylinder = CreateDecorPrimitive("MastCylinder_" + (mastSide > 0 ? "R" : "L"), PrimitiveType.Cylinder, forklift.transform, scene,
+                    new Vector3(mastSide * 0.3f, 1.45f, 1.3f), Quaternion.identity);
+                mastCylinder.transform.localScale = new Vector3(0.14f, 1.1f, 0.14f);
+                ApplyMaterial(mastCylinder, materials.ForkliftChrome);
+            }
+
+            for (int tie = 0; tie < 3; tie++)
+            {
+                GameObject mastTie = CreateDecorPrimitive("MastTie_" + (tie + 1), PrimitiveType.Cube, forklift.transform, scene,
+                    new Vector3(0f, 0.45f + tie * 1.0f, 1.2f), Quaternion.identity);
+                mastTie.transform.localScale = new Vector3(1.14f, 0.12f, 0.36f);
+                ApplyMaterial(mastTie, materials.ForkliftAccent);
+            }
 
             // Шарнир наклона мачты: вокруг него наклоняются мачта и вилы.
             GameObject mastTiltPivot = CreateGameObject("MastTiltPivot", forklift.transform, scene, new Vector3(0f, 0.12f, 1.2f), Quaternion.identity);
@@ -1555,7 +1897,7 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             Transform mastPivotTransform = mastTiltPivot.transform;
             Transform resetTransform = resetPointObject.transform;
             int groundMask = 1 << groundLayer;
-            int cubeMask = 1 << cubeLayer;
+            int cargoMask = 1 << cargoLayer;
 
             ApplySerializedChanges(forkliftController, serializedObject =>
             {
@@ -1564,9 +1906,19 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 SetObjectReference(serializedObject, "mastTiltPivot", mastPivotTransform);
                 SetObjectReference(serializedObject, "resetPoint", resetTransform);
                 SetInt(serializedObject, "groundLayers", groundMask);
-                SetInt(serializedObject, "cubeLayers", cubeMask);
-                SetVector3(serializedObject, "carryVolumeCenter", new Vector3(0f, 0.35f, 0.45f));
-                SetVector3(serializedObject, "carryVolumeSize", new Vector3(1.6f, 1.0f, 1.3f));
+                SetInt(serializedObject, "cargoLayers", cargoMask);
+                SetObjectReference(serializedObject, "forkCollider", forkCollider);
+                SetVector3(serializedObject, "carryVolumeCenter", new Vector3(0f, 0.3f, 0.45f));
+                SetVector3(serializedObject, "carryVolumeSize", new Vector3(1.6f, 0.9f, 1.7f));
+                // Захват груза: паллета фиксируется на вилах (kinematic + ребёнок каретки) и
+                // плавно садится на место; F — взять/отпустить, опускание вил тоже отпускает груз.
+                SetBool(serializedObject, "autoLockCargo", true);
+                SetInt(serializedObject, "grabKey", (int)KeyCode.F);
+                SetFloat(serializedObject, "lockAlignDuration", 0.22f);
+                SetFloat(serializedObject, "relockDelay", 0.5f);
+                SetBool(serializedObject, "autoReleaseWhenLowered", true);
+                SetFloat(serializedObject, "autoReleaseLiftHeight", 0.3f);
+                SetBool(serializedObject, "applyCargoWeight", true);
                 SetFloat(serializedObject, "groundCheckDistance", 0.9f);
                 SetFloat(serializedObject, "forkMinHeight", ForkMinHeight);
                 SetFloat(serializedObject, "startForkHeight", ForkMinHeight);
@@ -1610,6 +1962,28 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             tire.transform.localScale = new Vector3(WheelRadius * 2f, 0.175f, WheelRadius * 2f);
             ApplyMaterial(tire, materials.Wheel);
 
+            // Металлический диск и ступица: колесо читается как колесо, а не как чёрный цилиндр.
+            GameObject rim = CreateDecorPrimitive("Rim", PrimitiveType.Cylinder, wheelRoot.transform, scene, Vector3.zero, Quaternion.Euler(0f, 0f, 90f));
+            rim.transform.localScale = new Vector3(WheelRadius * 1.3f, 0.185f, WheelRadius * 1.3f);
+            ApplyMaterial(rim, materials.WheelRim);
+
+            GameObject hub = CreateDecorPrimitive("Hub", PrimitiveType.Cylinder, wheelRoot.transform, scene, Vector3.zero, Quaternion.Euler(0f, 0f, 90f));
+            hub.transform.localScale = new Vector3(WheelRadius * 0.45f, 0.2f, WheelRadius * 0.45f);
+            ApplyMaterial(hub, materials.ForkliftAccent);
+
+            // Протектор: шесть грунтозацепов по ободу.
+            for (int tread = 0; tread < 6; tread++)
+            {
+                float angle = tread * 60f;
+                float radians = angle * Mathf.Deg2Rad;
+                Vector3 treadPosition = new Vector3(0f, Mathf.Cos(radians) * WheelRadius, Mathf.Sin(radians) * WheelRadius);
+
+                GameObject treadBlock = CreateDecorPrimitive("Tread_" + (tread + 1), PrimitiveType.Cube, wheelRoot.transform, scene,
+                    treadPosition, Quaternion.Euler(angle, 0f, 0f));
+                treadBlock.transform.localScale = new Vector3(0.3f, 0.06f, 0.1f);
+                ApplyMaterial(treadBlock, materials.Wheel);
+            }
+
             return wheelRoot.transform;
         }
 
@@ -1617,14 +1991,18 @@ namespace KakayatoBurmalda.Forklift.EditorTools
 
         #region Зоны сортировки
 
+        /// <summary>
+        /// Три зоны сортировки внутри амбара: ящики, бочки, стройматериалы.
+        /// Зона читает тип груза (<see cref="CargoType"/>) и принимает только «свои» паллеты.
+        /// </summary>
         private static void BuildSortingZones(Transform zoneParent, Scene scene, DemoMaterials materials, string zoneTag, bool insideBarn)
         {
-            CubeColor[] colors = { CubeColor.Red, CubeColor.Green, CubeColor.Blue };
+            CargoType[] types = { CargoType.Boxes, CargoType.Barrels, CargoType.Construction };
 
-            for (int i = 0; i < colors.Length; i++)
+            for (int i = 0; i < types.Length; i++)
             {
-                CubeColor color = colors[i];
-                string zoneName = "SortingZone_" + color;
+                CargoType cargoType = types[i];
+                string zoneName = "SortingZone_" + cargoType;
 
                 // Зоны стоят ВНУТРИ амбара: локальные координаты относительно его корня.
                 // Если здания отключены в настройках — раскладываем зоны во дворе.
@@ -1641,118 +2019,381 @@ namespace KakayatoBurmalda.Forklift.EditorTools
 
                 BoxCollider trigger = zone.GetComponent<BoxCollider>();
                 trigger.isTrigger = true;
-                trigger.center = new Vector3(0f, 0.8f, 0f);
-                trigger.size = new Vector3(5f, 1.6f, 5f);
+                trigger.center = new Vector3(0f, 0.9f, 0f);
+                trigger.size = new Vector3(5f, 1.8f, 5f);
+
+                Material zoneMaterial = SafeMaterial(materials, cargoType);
 
                 // Площадка зоны: плоский декор без коллайдера, чтобы физика зоны шла только через триггер.
                 GameObject pad = CreateDecorPrimitive("Pad", PrimitiveType.Cube, zone.transform, scene, new Vector3(0f, 0.012f, 0f), Quaternion.identity);
                 pad.transform.localScale = new Vector3(5f, 0.02f, 5f);
-                ApplyMaterial(pad, SafeMaterial(materials, color));
+                ApplyMaterial(pad, zoneMaterial);
 
-                // Указатель цвета зоны — виден даже из глубины амбара.
-                GameObject sign = CreateDecorPrimitive("Sign", PrimitiveType.Cube, zone.transform, scene, new Vector3(0f, 2.6f, -2.4f), Quaternion.identity);
-                sign.transform.localScale = new Vector3(3f, 0.5f, 0.12f);
-                ApplyMaterial(sign, SafeMaterial(materials, color));
+                // Рамка по периметру: зона читается сверху и не сливается с полом амбара.
+                for (int side = -1; side <= 1; side += 2)
+                {
+                    GameObject borderX = CreateDecorPrimitive("Border_X_" + (side > 0 ? "P" : "M"), PrimitiveType.Cube, zone.transform, scene,
+                        new Vector3(0f, 0.05f, side * 2.35f), Quaternion.identity);
+                    borderX.transform.localScale = new Vector3(5f, 0.1f, 0.3f);
+                    ApplyMaterial(borderX, zoneMaterial);
+
+                    GameObject borderZ = CreateDecorPrimitive("Border_Z_" + (side > 0 ? "P" : "M"), PrimitiveType.Cube, zone.transform, scene,
+                        new Vector3(side * 2.35f, 0.05f, 0f), Quaternion.identity);
+                    borderZ.transform.localScale = new Vector3(0.3f, 0.1f, 5f);
+                    ApplyMaterial(borderZ, zoneMaterial);
+                }
+
+                // Указатель типа груза — виден из глубины амбара и со въезда.
+                GameObject sign = CreateDecorPrimitive("Sign", PrimitiveType.Cube, zone.transform, scene, new Vector3(0f, 2.7f, -2.5f), Quaternion.identity);
+                sign.transform.localScale = new Vector3(3f, 0.55f, 0.12f);
+                ApplyMaterial(sign, zoneMaterial);
+
+                BuildZoneCargoIcon(zone.transform, scene, materials, cargoType);
 
                 SortingZone sortingZone = zone.GetComponent<SortingZone>();
 
                 ApplySerializedChanges(sortingZone, serializedObject =>
                 {
-                    SetEnum<CubeColor>(serializedObject, "targetType", color);
+                    SetEnum<CargoType>(serializedObject, "targetType", cargoType);
                 });
             }
         }
 
-        private static Material SafeMaterial(DemoMaterials materials, CubeColor color)
+        /// <summary>Значок груза на указателе зоны: ящики, бочки или бетонная плита.</summary>
+        private static void BuildZoneCargoIcon(Transform zone, Scene scene, DemoMaterials materials, CargoType cargoType)
         {
-            Material zoneMaterial = materials.GetZoneMaterial(color);
-            return zoneMaterial != null ? zoneMaterial : materials.GetCubeMaterial(color);
+            Vector3 signPoint = new Vector3(0f, 2.7f, -2.42f);
+
+            switch (cargoType)
+            {
+                case CargoType.Boxes:
+                    for (int i = 0; i < 2; i++)
+                    {
+                        GameObject iconBox = CreateDecorPrimitive("SignIcon_Box_" + (i + 1), PrimitiveType.Cube, zone, scene,
+                            signPoint + new Vector3(i * 0.42f - 0.21f, 0f, -0.12f), Quaternion.identity);
+                        iconBox.transform.localScale = new Vector3(0.34f, 0.34f, 0.34f);
+                        ApplyMaterial(iconBox, materials.Cardboard);
+                    }
+                    break;
+
+                case CargoType.Barrels:
+                    for (int i = 0; i < 2; i++)
+                    {
+                        GameObject iconBarrel = CreateDecorPrimitive("SignIcon_Barrel_" + (i + 1), PrimitiveType.Cylinder, zone, scene,
+                            signPoint + new Vector3(i * 0.36f - 0.18f, 0f, -0.12f), Quaternion.identity);
+                        iconBarrel.transform.localScale = new Vector3(0.28f, 0.17f, 0.28f);
+                        ApplyMaterial(iconBarrel, materials.BarrelMetal);
+                    }
+                    break;
+
+                case CargoType.Construction:
+                    GameObject iconSlab = CreateDecorPrimitive("SignIcon_Slab", PrimitiveType.Cube, zone, scene,
+                        signPoint + new Vector3(0f, 0f, -0.12f), Quaternion.identity);
+                    iconSlab.transform.localScale = new Vector3(0.8f, 0.22f, 0.3f);
+                    ApplyMaterial(iconSlab, materials.Concrete);
+                    break;
+            }
+        }
+
+        private static Material SafeMaterial(DemoMaterials materials, CargoType cargoType)
+        {
+            Material zoneMaterial = materials.GetZoneMaterial(cargoType);
+            return zoneMaterial != null ? zoneMaterial : materials.GetCargoMaterial(cargoType);
         }
 
         #endregion
 
-        #region Кубики
+        #region Паллеты с грузом
 
-        private static void BuildCubes(Transform parent, Scene scene, GenerationOptions options, DemoMaterials materials, int cubeLayer, string cubeTag)
+        /// <summary>
+        /// Паллеты с грузом на улице между домом и амбаром. Паллета — деревянный поддон из тонких
+        /// реек (декор) с одним BoxCollider на всю паллету и грузом своего типа сверху:
+        /// ящики, бочки или стройматериалы. Погрузчик фиксирует паллету на вилах (см. ForkliftController).
+        /// </summary>
+        private static void BuildPallets(Transform parent, Scene scene, GenerationOptions options, DemoMaterials materials, int cargoLayer, string cargoTag)
         {
-            CubeColor[] colors = { CubeColor.Red, CubeColor.Green, CubeColor.Blue };
-            int cubesPerColor = Mathf.Clamp(options.cubesPerColor, 1, 6);
-            int totalCubes = colors.Length * cubesPerColor;
+            CargoType[] types = { CargoType.Boxes, CargoType.Barrels, CargoType.Construction };
+            int perType = Mathf.Clamp(options.palletsPerType, 1, 4);
+            int totalPallets = types.Length * perType;
 
-            GameObject cubesRoot = CreateGameObject("Cubes", parent, scene, Vector3.zero, Quaternion.identity);
-            List<Vector3> positions = BuildCubeScatterPositions(totalCubes);
+            GameObject palletsRoot = CreateGameObject("CargoPallets", parent, scene, Vector3.zero, Quaternion.identity);
+            List<Vector3> positions = BuildPalletScatterPositions(totalPallets);
 
-            int cubeIndex = 0;
+            int palletIndex = 0;
             System.Random random = new System.Random(20240607);
 
-            for (int colorIndex = 0; colorIndex < colors.Length; colorIndex++)
+            for (int typeIndex = 0; typeIndex < types.Length; typeIndex++)
             {
-                CubeColor color = colors[colorIndex];
+                CargoType cargoType = types[typeIndex];
 
-                for (int i = 0; i < cubesPerColor; i++)
+                for (int i = 0; i < perType; i++)
                 {
-                    Vector3 position = positions[cubeIndex];
+                    Vector3 position = positions[palletIndex];
                     Quaternion rotation = Quaternion.Euler(0f, NextFloat(random, 0f, 360f), 0f);
-                    string cubeName = string.Format("Cube_{0}_{1:00}", color, i + 1);
 
-                    GameObject cube = CreatePrimitive(cubeName, PrimitiveType.Cube, cubesRoot.transform, scene, position, rotation);
-                    cube.transform.localScale = Vector3.one * CubeSize;
-                    ApplyMaterial(cube, materials.GetCubeMaterial(color));
-
-                    if (cubeLayer > 0)
-                    {
-                        cube.layer = cubeLayer;
-                    }
-
-                    if (!string.IsNullOrEmpty(cubeTag))
-                    {
-                        cube.tag = cubeTag;
-                    }
-
-                    Rigidbody cubeBody = cube.AddComponent<Rigidbody>();
-                    cubeBody.mass = 2f;
-                    cubeBody.drag = 0.05f;
-                    cubeBody.angularDrag = 0.6f;
-                    cubeBody.interpolation = RigidbodyInterpolation.Interpolate;
-                    cubeBody.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
-
-                    CubeProperty cubeProperty = cube.AddComponent<CubeProperty>();
-
-                    ApplySerializedChanges(cubeProperty, serializedObject =>
-                    {
-                        SetEnum<CubeColor>(serializedObject, "cubeType", color);
-                        SetInt(serializedObject, "scoreValue", 10);
-                        SetFloat(serializedObject, "mass", 2f);
-                    });
-
-                    cubeIndex++;
+                    BuildPallet(palletsRoot.transform, scene, materials, cargoType, palletIndex, position, rotation, cargoLayer, cargoTag);
+                    palletIndex++;
                 }
             }
         }
 
+        /// <summary>Одна паллета: поддон, груз по типу, коллайдер на всю паллету и компонент CargoPallet.</summary>
+        private static GameObject BuildPallet(Transform parent, Scene scene, DemoMaterials materials, CargoType cargoType,
+            int palletIndex, Vector3 position, Quaternion rotation, int cargoLayer, string cargoTag)
+        {
+            string palletName = string.Format("Pallet_{0}_{1:00}", cargoType, palletIndex + 1);
+
+            GameObject pallet = CreateGameObject(palletName, parent, scene, position, rotation);
+
+            Vector3 cargoSize = GetCargoSize(cargoType);
+            float totalHeight = PalletDeckHeight + cargoSize.y;
+
+            BoxCollider palletCollider = pallet.AddComponent<BoxCollider>();
+            palletCollider.center = new Vector3(0f, totalHeight * 0.5f, 0f);
+            palletCollider.size = new Vector3(
+                Mathf.Max(PalletSizeX, cargoSize.x),
+                totalHeight,
+                Mathf.Max(PalletSizeZ, cargoSize.z));
+
+            BuildPalletDeck(pallet.transform, scene, materials);
+            BuildCargo(pallet.transform, scene, materials, cargoType, cargoSize);
+
+            if (cargoLayer > 0)
+            {
+                pallet.layer = cargoLayer;
+            }
+
+            if (!string.IsNullOrEmpty(cargoTag))
+            {
+                pallet.tag = cargoTag;
+            }
+
+            Rigidbody palletBody = pallet.AddComponent<Rigidbody>();
+            palletBody.mass = GetCargoMass(cargoType);
+            palletBody.drag = 0.05f;
+            palletBody.angularDrag = 0.8f;
+            palletBody.interpolation = RigidbodyInterpolation.Interpolate;
+            palletBody.collisionDetectionMode = CollisionDetectionMode.ContinuousSpeculative;
+
+            CargoPallet cargoPallet = pallet.AddComponent<CargoPallet>();
+
+            ApplySerializedChanges(cargoPallet, serializedObject =>
+            {
+                SetEnum<CargoType>(serializedObject, "cargoType", cargoType);
+                SetInt(serializedObject, "scoreValue", GetCargoScore(cargoType));
+                SetFloat(serializedObject, "mass", GetCargoMass(cargoType));
+                SetBool(serializedObject, "isPushable", true);
+                SetBool(serializedObject, "destroyAfterSorting", true);
+                SetBool(serializedObject, "disablePhysicsAfterSorting", true);
+            });
+
+            return pallet;
+        }
+
+        /// <summary>Деревянный поддон: три подкладки снизу и настил из тонких реек сверху.</summary>
+        private static void BuildPalletDeck(Transform parent, Scene scene, DemoMaterials materials)
+        {
+            float runnerHeight = PalletDeckHeight - PalletSlatHeight;
+
+            for (int runner = -1; runner <= 1; runner++)
+            {
+                GameObject bottomBoard = CreateDecorPrimitive("Pallet_Runner_" + (runner + 2), PrimitiveType.Cube, parent, scene,
+                    new Vector3(runner * (PalletSizeX * 0.5f - 0.12f), runnerHeight * 0.5f, 0f), Quaternion.identity);
+                bottomBoard.transform.localScale = new Vector3(0.18f, runnerHeight, PalletSizeZ);
+                ApplyMaterial(bottomBoard, materials.PalletWoodDark);
+            }
+
+            const int slats = 7;
+            float slatPitch = PalletSizeZ / slats;
+
+            for (int slat = 0; slat < slats; slat++)
+            {
+                float z = -PalletSizeZ * 0.5f + slatPitch * (slat + 0.5f);
+
+                GameObject deckBoard = CreateDecorPrimitive("Pallet_Slat_" + (slat + 1), PrimitiveType.Cube, parent, scene,
+                    new Vector3(0f, PalletDeckHeight - PalletSlatHeight * 0.5f, z), Quaternion.identity);
+                deckBoard.transform.localScale = new Vector3(PalletSizeX, PalletSlatHeight, slatPitch * 0.78f);
+                ApplyMaterial(deckBoard, materials.PalletWood);
+            }
+        }
+
+        /// <summary>Габариты груза по типу (ширина, высота, глубина) — по ним строится коллайдер паллеты.</summary>
+        private static Vector3 GetCargoSize(CargoType cargoType)
+        {
+            switch (cargoType)
+            {
+                case CargoType.Boxes: return new Vector3(1.12f, 0.95f, 0.98f);
+                case CargoType.Barrels: return new Vector3(1.16f, 0.86f, 1.16f);
+                case CargoType.Construction: return new Vector3(1.1f, 0.74f, 0.82f);
+                default: return new Vector3(1f, 0.6f, 1f);
+            }
+        }
+
+        /// <summary>Очки за правильную сортировку груза по типу.</summary>
+        private static int GetCargoScore(CargoType cargoType)
+        {
+            switch (cargoType)
+            {
+                case CargoType.Boxes: return 10;
+                case CargoType.Barrels: return 15;
+                case CargoType.Construction: return 20;
+                default: return 5;
+            }
+        }
+
+        /// <summary>Масса паллеты с грузом, кг: тяжёлые плиты ощущаются на разгоне.</summary>
+        private static float GetCargoMass(CargoType cargoType)
+        {
+            switch (cargoType)
+            {
+                case CargoType.Boxes: return 35f;
+                case CargoType.Barrels: return 110f;
+                case CargoType.Construction: return 160f;
+                default: return 30f;
+            }
+        }
+
+        private static void BuildCargo(Transform parent, Scene scene, DemoMaterials materials, CargoType cargoType, Vector3 cargoSize)
+        {
+            switch (cargoType)
+            {
+                case CargoType.Boxes:
+                    BuildBoxesCargo(parent, scene, materials);
+                    break;
+
+                case CargoType.Barrels:
+                    BuildBarrelsCargo(parent, scene, materials);
+                    break;
+
+                case CargoType.Construction:
+                    BuildConstructionCargo(parent, scene, materials);
+                    break;
+            }
+        }
+
+        /// <summary>Ящики: картонные коробки в два слоя, верхние — со скотчем.</summary>
+        private static void BuildBoxesCargo(Transform parent, Scene scene, DemoMaterials materials)
+        {
+            const float boxSize = 0.46f;
+            float firstLayer = PalletDeckHeight + boxSize * 0.5f;
+            float secondLayer = PalletDeckHeight + boxSize * 1.5f;
+
+            for (int x = -1; x <= 1; x += 2)
+            {
+                for (int z = -1; z <= 1; z += 2)
+                {
+                    GameObject box = CreateDecorPrimitive(
+                        string.Format("Cargo_Box_{0}{1}", x > 0 ? "R" : "L", z > 0 ? "B" : "F"),
+                        PrimitiveType.Cube, parent, scene,
+                        new Vector3(x * 0.28f, firstLayer, z * 0.26f), Quaternion.Euler(0f, x * z * 2.5f, 0f));
+                    box.transform.localScale = new Vector3(boxSize, boxSize, boxSize * 0.92f);
+                    ApplyMaterial(box, materials.Cardboard);
+                }
+            }
+
+            for (int top = 0; top < 2; top++)
+            {
+                float offsetX = top == 0 ? -0.2f : 0.22f;
+                float offsetZ = top == 0 ? -0.12f : 0.14f;
+                Quaternion topRotation = Quaternion.Euler(0f, top == 0 ? 6f : -7f, 0f);
+
+                GameObject box = CreateDecorPrimitive("Cargo_Box_Top_" + (top + 1), PrimitiveType.Cube, parent, scene,
+                    new Vector3(offsetX, secondLayer, offsetZ), topRotation);
+                box.transform.localScale = new Vector3(boxSize, boxSize, boxSize * 0.92f);
+                ApplyMaterial(box, materials.Cardboard);
+
+                GameObject tape = CreateDecorPrimitive("Cargo_Tape_" + (top + 1), PrimitiveType.Cube, parent, scene,
+                    new Vector3(offsetX, secondLayer + boxSize * 0.5f + 0.014f, offsetZ), topRotation);
+                tape.transform.localScale = new Vector3(boxSize * 0.28f, 0.028f, boxSize * 0.95f);
+                ApplyMaterial(tape, materials.Tape);
+            }
+        }
+
+        /// <summary>Бочки: четыре стальные бочки с обручами и крышками.</summary>
+        private static void BuildBarrelsCargo(Transform parent, Scene scene, DemoMaterials materials)
+        {
+            const float barrelRadius = 0.27f;
+            const float barrelHeight = 0.8f;
+            float barrelCenterY = PalletDeckHeight + barrelHeight * 0.5f;
+
+            int barrelIndex = 0;
+
+            for (int x = -1; x <= 1; x += 2)
+            {
+                for (int z = -1; z <= 1; z += 2)
+                {
+                    barrelIndex++;
+                    Vector3 center = new Vector3(x * 0.29f, barrelCenterY, z * 0.29f);
+
+                    GameObject barrel = CreateDecorPrimitive("Cargo_Barrel_" + barrelIndex, PrimitiveType.Cylinder, parent, scene, center, Quaternion.identity);
+                    barrel.transform.localScale = new Vector3(barrelRadius * 2f, barrelHeight * 0.5f, barrelRadius * 2f);
+                    ApplyMaterial(barrel, materials.BarrelMetal);
+
+                    for (int hoop = -1; hoop <= 1; hoop += 2)
+                    {
+                        GameObject ring = CreateDecorPrimitive("Cargo_BarrelHoop_" + barrelIndex + "_" + (hoop > 0 ? "Top" : "Bottom"),
+                            PrimitiveType.Cylinder, parent, scene, center + new Vector3(0f, hoop * barrelHeight * 0.28f, 0f), Quaternion.identity);
+                        ring.transform.localScale = new Vector3(barrelRadius * 2.12f, 0.03f, barrelRadius * 2.12f);
+                        ApplyMaterial(ring, materials.BarrelHoop);
+                    }
+
+                    GameObject cap = CreateDecorPrimitive("Cargo_BarrelCap_" + barrelIndex, PrimitiveType.Cylinder, parent, scene,
+                        center + new Vector3(0f, barrelHeight * 0.5f + 0.02f, 0f), Quaternion.identity);
+                    cap.transform.localScale = new Vector3(barrelRadius * 1.8f, 0.02f, barrelRadius * 1.8f);
+                    ApplyMaterial(cap, materials.BarrelHoop);
+                }
+            }
+        }
+
+        /// <summary>Стройматериалы: бетонные плиты стопкой и пара блоков поверх.</summary>
+        private static void BuildConstructionCargo(Transform parent, Scene scene, DemoMaterials materials)
+        {
+            const float slabHeight = 0.14f;
+
+            for (int slab = 0; slab < 3; slab++)
+            {
+                GameObject plate = CreateDecorPrimitive("Cargo_Slab_" + (slab + 1), PrimitiveType.Cube, parent, scene,
+                    new Vector3(0.02f * (slab - 1), PalletDeckHeight + slabHeight * (slab + 0.5f), 0.02f * (slab - 1)),
+                    Quaternion.Euler(0f, slab * 3f - 3f, 0f));
+                plate.transform.localScale = new Vector3(1.02f, slabHeight, 0.74f);
+                ApplyMaterial(plate, slab == 1 ? materials.ConcreteDark : materials.Concrete);
+            }
+
+            for (int block = 0; block < 2; block++)
+            {
+                float offsetX = block == 0 ? -0.24f : 0.26f;
+                float offsetZ = block == 0 ? -0.16f : 0.18f;
+
+                GameObject cinderBlock = CreateDecorPrimitive("Cargo_Block_" + (block + 1), PrimitiveType.Cube, parent, scene,
+                    new Vector3(offsetX, PalletDeckHeight + slabHeight * 3f + 0.15f, offsetZ), Quaternion.Euler(0f, block * 8f, 0f));
+                cinderBlock.transform.localScale = new Vector3(0.42f, 0.3f, 0.28f);
+                ApplyMaterial(cinderBlock, materials.ConcreteDark);
+            }
+        }
+
         /// <summary>
-        /// Позиции кубиков: улица между домом и амбаром. Старт погрузчика — южнее,
-        /// зоны сортировки — внутри амбара севернее, поэтому все кубики лежат «по пути».
+        /// Позиции паллет: улица между домом и амбаром. Старт погрузчика — южнее,
+        /// зоны сортировки — внутри амбара севернее, поэтому все паллеты лежат «по пути».
         /// </summary>
-        private static List<Vector3> BuildCubeScatterPositions(int totalCubes)
+        private static List<Vector3> BuildPalletScatterPositions(int totalPallets)
         {
             const int columns = 3;
-            const float columnSpacing = 3.4f;
-            const float rowSpacing = 4.2f;
+            const float columnSpacing = 3.8f;
+            const float rowSpacing = 4.6f;
             const float streetStartZ = -9f;
 
-            List<Vector3> positions = new List<Vector3>(totalCubes);
+            List<Vector3> positions = new List<Vector3>(totalPallets);
             System.Random random = new System.Random(1337);
 
-            for (int index = 0; index < totalCubes; index++)
+            for (int index = 0; index < totalPallets; index++)
             {
                 int column = index % columns;
                 int row = index / columns;
 
-                float x = (column - (columns - 1) * 0.5f) * columnSpacing + NextFloat(random, -0.55f, 0.55f);
-                float z = streetStartZ + row * rowSpacing + NextFloat(random, -0.7f, 0.7f);
+                float x = (column - (columns - 1) * 0.5f) * columnSpacing + NextFloat(random, -0.5f, 0.5f);
+                float z = streetStartZ + row * rowSpacing + NextFloat(random, -0.6f, 0.6f);
 
-                positions.Add(new Vector3(x, CubeSize * 0.5f + 0.05f, z));
+                positions.Add(new Vector3(x, 0.02f, z));
             }
 
             return positions;
@@ -2220,8 +2861,8 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 return;
             }
 
-            // Пишем целочисленное значение напрямую: у CubeColor есть None = -1, поэтому индекс
-            // в enumNames не совпадает со значением и enumValueIndex использовать нельзя.
+            // Пишем целочисленное значение напрямую: enumValueIndex зависит от порядка имён
+            // в списке, а intValue всегда равен значению enum (CargoType.None = 0 и далее).
             property.intValue = Convert.ToInt32(value);
         }
 

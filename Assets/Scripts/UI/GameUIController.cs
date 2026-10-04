@@ -12,9 +12,9 @@ namespace KakayatoBurmalda.Forklift
     /// HUD симулятора погрузчика.
     ///
     /// Что делает:
-    ///   * подписывается на события <see cref="GameManager"/> (OnScoreChanged, OnCubeSorted,
-    ///     OnCubeMisplaced, OnLevelCompleted) и обновляет текстовые поля;
-    ///   * показывает очки, «отсортировано X / N», сколько кубиков осталось, счётчик ошибок
+    ///   * подписывается на события <see cref="GameManager"/> (OnScoreChanged, OnPalletSorted,
+    ///     OnPalletMisplaced, OnLevelCompleted) и обновляет текстовые поля;
+    ///   * показывает очки, «отсортировано X / N», сколько паллет с грузом осталось, счётчик ошибок
     ///     и таймер сессии в формате ММ:СС;
     ///   * по событию OnLevelCompleted плавно показывает панель «Уровень завершён»;
     ///   * корректно отписывается от событий в OnDisable (без утечек и «мёртвых» колбэков).
@@ -158,20 +158,20 @@ namespace KakayatoBurmalda.Forklift
         [SerializeField, Tooltip("Текущие очки.")]
         private LabelBinding scoreLabel = new LabelBinding();
 
-        [SerializeField, Tooltip("Сколько кубиков отсортировано (X из N).")]
+        [SerializeField, Tooltip("Сколько паллет отсортировано (X из N).")]
         private LabelBinding sortedLabel = new LabelBinding();
 
-        [SerializeField, Tooltip("Сколько кубиков осталось на уровне.")]
+        [SerializeField, Tooltip("Сколько паллет с грузом осталось на уровне.")]
         private LabelBinding remainingLabel = new LabelBinding();
 
-        [SerializeField, Tooltip("Счётчик ошибок (кубиков не в свою зону).")]
+        [SerializeField, Tooltip("Счётчик ошибок (паллет не в свою зону).")]
         private LabelBinding mistakesLabel = new LabelBinding();
 
         [SerializeField, Tooltip("Таймер сессии в формате ММ:СС.")]
         private LabelBinding timerLabel = new LabelBinding();
 
         [Header("Панель «Уровень завершён»")]
-        [SerializeField, Tooltip("Панель, которая появляется после сортировки всех кубиков.")]
+        [SerializeField, Tooltip("Панель, которая появляется после сортировки всего груза.")]
         private GameObject levelCompletedPanel;
 
         [SerializeField, Tooltip("CanvasGroup панели для плавного появления (если пусто — ищется на панели или создаётся).")]
@@ -196,7 +196,7 @@ namespace KakayatoBurmalda.Forklift
         [Header("Формат текста")]
         [SerializeField] private string scoreFormat = "Очки: {0}";
         [SerializeField] private string sortedFormat = "Отсортировано: {0} / {1}";
-        [SerializeField] private string remainingFormat = "Осталось кубиков: {0}";
+        [SerializeField] private string remainingFormat = "Осталось паллет: {0}";
         [SerializeField] private string mistakesFormat = "Ошибки: {0}";
         [SerializeField] private string timerFormat = "Время: {0}";
         [SerializeField]
@@ -329,8 +329,8 @@ namespace KakayatoBurmalda.Forklift
 
             subscribedManager = manager;
             subscribedManager.OnScoreChanged += HandleScoreChanged;
-            subscribedManager.OnCubeSorted += HandleCubeSorted;
-            subscribedManager.OnCubeMisplaced += HandleCubeMisplaced;
+            subscribedManager.OnPalletSorted += HandlePalletSorted;
+            subscribedManager.OnPalletMisplaced += HandlePalletMisplaced;
             subscribedManager.OnLevelCompleted += HandleLevelCompleted;
 
             if (logEvents)
@@ -349,8 +349,8 @@ namespace KakayatoBurmalda.Forklift
             }
 
             subscribedManager.OnScoreChanged -= HandleScoreChanged;
-            subscribedManager.OnCubeSorted -= HandleCubeSorted;
-            subscribedManager.OnCubeMisplaced -= HandleCubeMisplaced;
+            subscribedManager.OnPalletSorted -= HandlePalletSorted;
+            subscribedManager.OnPalletMisplaced -= HandlePalletMisplaced;
             subscribedManager.OnLevelCompleted -= HandleLevelCompleted;
 
             if (logEvents)
@@ -376,22 +376,22 @@ namespace KakayatoBurmalda.Forklift
             UpdateMistakesLabel();
         }
 
-        private void HandleCubeSorted(CubeProperty cube, SortingZone zone, int awardedScore)
+        private void HandlePalletSorted(CargoPallet pallet, SortingZone zone, int awardedScore)
         {
             if (logEvents)
             {
-                Debug.Log(string.Format("[GameUIController] OnCubeSorted: {0} (+{1}).", cube != null ? cube.name : "null", awardedScore), this);
+                Debug.Log(string.Format("[GameUIController] OnPalletSorted: {0} (+{1}).", pallet != null ? pallet.name : "null", awardedScore), this);
             }
 
             UpdateScoreLabel();
             UpdateSortedLabels();
         }
 
-        private void HandleCubeMisplaced(CubeProperty cube, SortingZone zone, int penalty)
+        private void HandlePalletMisplaced(CargoPallet pallet, SortingZone zone, int penalty)
         {
             if (logEvents)
             {
-                Debug.Log(string.Format("[GameUIController] OnCubeMisplaced: {0} (-{1}).", cube != null ? cube.name : "null", penalty), this);
+                Debug.Log(string.Format("[GameUIController] OnPalletMisplaced: {0} (-{1}).", pallet != null ? pallet.name : "null", penalty), this);
             }
 
             UpdateScoreLabel();
@@ -429,8 +429,8 @@ namespace KakayatoBurmalda.Forklift
 
         private void UpdateSortedLabels()
         {
-            sortedLabel.SetText(string.Format(sortedFormat, GetSortedCubesCount(), GetTotalCubesCount()));
-            remainingLabel.SetText(string.Format(remainingFormat, GetRemainingCubesCount()));
+            sortedLabel.SetText(string.Format(sortedFormat, GetSortedPalletsCount(), GetTotalPalletsCount()));
+            remainingLabel.SetText(string.Format(remainingFormat, GetRemainingPalletsCount()));
         }
 
         private void UpdateMistakesLabel()
@@ -618,7 +618,7 @@ namespace KakayatoBurmalda.Forklift
             levelCompletedSummaryLabel.SetText(string.Format(
                 completedSummaryFormat,
                 GetScore(),
-                GetSortedCubesCount(),
+                GetSortedPalletsCount(),
                 GetMistakesCount(),
                 FormatTime(timerSeconds)));
         }
@@ -664,28 +664,28 @@ namespace KakayatoBurmalda.Forklift
             return manager != null ? manager.Score : 0;
         }
 
-        private int GetSortedCubesCount()
+        private int GetSortedPalletsCount()
         {
             GameManager manager = GetManager();
-            return manager != null ? manager.SortedCubesCount : 0;
+            return manager != null ? manager.SortedPalletsCount : 0;
         }
 
-        private int GetTotalCubesCount()
+        private int GetTotalPalletsCount()
         {
             GameManager manager = GetManager();
-            return manager != null ? manager.TotalCubesSeen : 0;
+            return manager != null ? manager.TotalPalletsSeen : 0;
         }
 
-        private int GetRemainingCubesCount()
+        private int GetRemainingPalletsCount()
         {
             GameManager manager = GetManager();
-            return manager != null ? manager.RemainingCubesCount : 0;
+            return manager != null ? manager.RemainingPalletsCount : 0;
         }
 
         private int GetMistakesCount()
         {
             GameManager manager = GetManager();
-            return manager != null ? manager.MisplacedCubesCount : 0;
+            return manager != null ? manager.MisplacedCargoCount : 0;
         }
 
         #endregion
