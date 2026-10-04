@@ -889,7 +889,8 @@ namespace KakayatoBurmalda.Forklift.EditorTools
 
             if (follow == null)
             {
-                follow = Undo.AddComponent<CameraFollow>(cameraTransform);
+                // Undo.AddComponent<T>() принимает GameObject, а не Transform.
+                follow = Undo.AddComponent<CameraFollow>(cameraTransform.gameObject);
             }
 
             ApplySerializedChanges(follow, serializedObject =>
