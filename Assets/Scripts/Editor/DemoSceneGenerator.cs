@@ -59,6 +59,9 @@ namespace KakayatoBurmalda.Forklift.EditorTools
         private const int DefaultCubesPerColor = 3;
         private const float WheelRadius = 0.3f;
 
+        /// <summary>Нижнее положение вил в демо-сцене (используется при расчёте геометрии скоса-заезда).</summary>
+        private const float ForkMinHeight = 0.02f;
+
         /// <summary>Стартовая позиция погрузчика: лицом в +Z, к дому и амбару.</summary>
         private static readonly Vector3 ForkliftStartPosition = new Vector3(0f, 0f, -26f);
 
@@ -1489,13 +1492,29 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             ApplyMaterial(rightFork, materials.ForkliftAccent);
 
             // Скос-заезд на кончиках вил. Кубик стоит на земле, и под плоские вилы он физически
-            // не поддевается — только толкается. Наклонная пластина у кончика вил работает как
-            // пандус: при наезде кубик сам поднимается по ней и остаётся лежать на вилах.
+            // не поддевается — только толкается. Наклонная пластина работает пандусом: при наезде
+            // кубик сам поднимается по ней и остаётся лежать на вилах.
+            // Геометрия считается от фактических размеров вил: передняя кромка скоса лежит на земле
+            // (когда вилы опущены в нижнее положение), задняя — чуть выше верхней плоскости вил.
+            const float rampAngle = 10f;
+            const float rampLength = 0.9f;
+            const float rampThickness = 0.03f;
+            // 4,5 см запаса: корпус в покое «садится» на 2,5 см (днище коллайдера на 0.025 выше нуля),
+            // и кромка скоса не должна врезаться в землю.
+            const float rampGroundClearance = 0.045f;
+
+            float rampAngleRadians = rampAngle * Mathf.Deg2Rad;
+            float carriageLocalHeight = mastTiltPivot.transform.localPosition.y + forkMinHeight;
+            float rampCenterLocalY = (rampGroundClearance - carriageLocalHeight)
+                + rampLength * 0.5f * Mathf.Sin(rampAngleRadians)
+                + rampThickness * 0.5f * Mathf.Cos(rampAngleRadians);
+            float rampCenterLocalZ = forkCollider.center.z + forkCollider.size.z * 0.5f - rampLength * 0.5f;
+
             GameObject forkRamp = CreateGameObject("ForkRamp", forkCarriage.transform, scene,
-                new Vector3(0f, -0.06f, 1.35f), Quaternion.Euler(20f, 0f, 0f));
+                new Vector3(0f, rampCenterLocalY, rampCenterLocalZ), Quaternion.Euler(rampAngle, 0f, 0f));
 
             BoxCollider rampCollider = forkRamp.AddComponent<BoxCollider>();
-            rampCollider.size = new Vector3(1.3f, 0.06f, 0.9f);
+            rampCollider.size = new Vector3(forkCollider.size.x, rampThickness, rampLength);
 
             if (chassisMaterial != null)
             {
@@ -1536,6 +1555,12 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 SetVector3(serializedObject, "carryVolumeCenter", new Vector3(0f, 0.35f, 0.45f));
                 SetVector3(serializedObject, "carryVolumeSize", new Vector3(1.6f, 1.0f, 1.3f));
                 SetFloat(serializedObject, "groundCheckDistance", 0.9f);
+                SetFloat(serializedObject, "forkMinHeight", ForkMinHeight);
+                SetFloat(serializedObject, "startForkHeight", ForkMinHeight);
+                // Наклон вперёд в демо-сцене запрещён: на нижнем положении вил скос-заезд
+                // упирается в землю, и физика начинает «выталкивать» погрузчик.
+                SetFloat(serializedObject, "mastMinTilt", 0f);
+                SetFloat(serializedObject, "mastMaxTilt", 20f);
                 SetFloat(serializedObject, "groundCheckRadius", 0.22f);
                 SetFloat(serializedObject, "forwardMotorForce", 16000f);
                 SetFloat(serializedObject, "reverseMotorForce", 10000f);
