@@ -371,6 +371,10 @@ jobs:
         run: |
           # Убираем customtkinter из Python, чтобы pip действительно пришлось скачивать его заново.
           & $env:APP_PYTHON -m pip uninstall -y customtkinter
+          # Убеждаемся, что библиотеки больше нет (иначе тест бессмыслен).
+          & $env:APP_PYTHON -c "import importlib.util, sys; sys.exit(1 if importlib.util.find_spec('customtkinter') else 0)"
+          # Библиотека всё ещё видна — сообщаем.
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::customtkinter не удалился из Python"; throw "customtkinter не удалился" }
           # Файл hosts Windows.
           $hosts = "$env:SystemRoot\System32\drivers\etc\hosts"
           # Исходное содержимое.
@@ -391,14 +395,22 @@ jobs:
             $seconds = [math]::Round($watch.Elapsed.TotalSeconds)
             # Журнал — в вывод шага.
             Get-Content $log -Encoding utf8
+            # Ключевые строки журнала — аннотацией (видны вверху страницы запуска даже при ошибке).
+            $key = Get-Content $log -Encoding utf8 | Where-Object { $_ -match 'Python|pip:|Библиотеки|Сетевая|exit code|Проверка' } | Select-Object -Last 40
+            # Экранируем переводы строк для формата команд GitHub.
+            $body = ($key -join "`n").Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            # Публикуем.
+            Write-Host "::notice title=Тест pypi.org: ключевые строки журнала::$body"
+            # Функция: показать причину провала аннотацией и остановить шаг.
+            function Fail([string]$message) { Write-Host "::error title=Тест «нет интернета» (pypi.org)::$message"; throw $message }
             # Установка программы должна завершиться успешно (шаг с библиотеками пропускается).
-            if ($p.ExitCode -ne 0) { throw "Установщик завершился с кодом $($p.ExitCode)" }
+            if ($p.ExitCode -ne 0) { Fail "Установщик завершился с кодом $($p.ExitCode)" }
             # Python должен быть найден, а не скачан заново.
-            if (-not (Get-Content $log -Encoding utf8 | Where-Object { $_ -match 'Найден подходящий Python' })) { throw "Установщик не нашёл уже установленный Python" }
+            if (-not (Get-Content $log -Encoding utf8 | Where-Object { $_ -match 'Найден подходящий Python' })) { Fail "Установщик не нашёл уже установленный Python" }
             # Установщик должен был распознать именно сетевую проблему.
-            if (-not (Get-Content $log -Encoding utf8 | Where-Object { $_ -match 'Сетевая ошибка: 1' })) { throw "Сетевая ошибка pip не распознана" }
+            if (-not (Get-Content $log -Encoding utf8 | Where-Object { $_ -match 'Сетевая ошибка: 1' })) { Fail "Сетевая ошибка pip не распознана" }
             # Файлы программы и ярлык на месте.
-            if (-not (Test-Path "$env:APP_DIR\main.py")) { throw "Программа не установлена" }
+            if (-not (Test-Path "$env:APP_DIR\main.py")) { Fail "Программа не установлена" }
             # Итог — аннотацией.
             Write-Host "::notice title=Тест «нет интернета» (pypi.org) пройден::Установка завершилась за $seconds с, сетевая ошибка pip распознана, шаг с библиотеками пропущен без зависания."
           }
