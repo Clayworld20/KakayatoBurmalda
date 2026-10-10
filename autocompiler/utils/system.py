@@ -89,10 +89,48 @@ ProgressHandler = Callable[[float], None]
 #   ПУТИ ПРОГРАММЫ                                                        #
 # ====================================================================== #
 
+def is_frozen() -> bool:
+    """True, если компилятор сам запущен из собранного PyInstaller-файла Auto-Compiler.exe."""
+    # PyInstaller выставляет sys.frozen = True внутри собранного приложения.
+    return bool(getattr(sys, "frozen", False))
+
+
+def frozen_bundle_dir() -> Optional[Path]:
+    """Временная папка, куда собранный Auto-Compiler.exe распаковал свои библиотеки (или None)."""
+    # sys._MEIPASS есть только внутри собранного приложения.
+    bundle = getattr(sys, "_MEIPASS", None)
+    # Возвращаем путь, если он есть.
+    return Path(bundle) if bundle else None
+
+
+def sanitize_frozen_environment() -> None:
+    """
+    Вернуть Windows стандартный порядок поиска DLL (только внутри собранного Auto-Compiler.exe).
+
+    Загрузчик PyInstaller вызывает SetDllDirectoryW(<папка распаковки>), и эту настройку
+    наследуют ВСЕ запускаемые нами программы. Встроенный Python, pip и PyInstaller тогда
+    могли бы подхватить чужие (наши) копии DLL другой версии. Документация PyInstaller
+    советует сбросить настройку вызовом SetDllDirectoryW(NULL) — что мы и делаем.
+    Модули Python (.pyd) от этого не страдают: они ищут зависимости в своей папке.
+    """
+    # Нужно только в Windows и только в собранном .exe.
+    if not (IS_WINDOWS and is_frozen()):
+        return
+    # Вызов WinAPI не должен ронять программу ни при каких условиях.
+    try:
+        # ctypes — прямой вызов функций Windows.
+        import ctypes
+        # NULL (None) — восстановить стандартный порядок поиска DLL.
+        ctypes.windll.kernel32.SetDllDirectoryW(None)  # type: ignore[attr-defined]
+    # Не получилось — работаем как есть.
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def program_root() -> Path:
     """Папка, где лежит сама программа (рядом с main.py или с собранным .exe компилятора)."""
     # Если компилятор сам собран в .exe — берём папку этого .exe.
-    if getattr(sys, "frozen", False):
+    if is_frozen():
         return Path(sys.executable).resolve().parent
     # Иначе: этот файл лежит в autocompiler/utils/ — поднимаемся на два уровня вверх.
     return Path(__file__).resolve().parents[2]
@@ -177,6 +215,21 @@ def hidden_subprocess_kwargs() -> dict[str, Any]:
     }
 
 
+def _is_inside(path: Path, folder: Path) -> bool:
+    """Лежит ли path внутри folder (сравнение без учёта регистра в Windows)."""
+    # Сравнение путей может упасть на «кривых» значениях из PATH.
+    try:
+        # Нормализуем оба пути (регистр, разделители).
+        child = os.path.normcase(os.path.abspath(str(path)))
+        # Папка-контейнер.
+        parent = os.path.normcase(os.path.abspath(str(folder)))
+        # Совпадает или начинается с «папка + разделитель».
+        return child == parent or child.startswith(parent.rstrip(os.sep) + os.sep)
+    # Ошибку считаем «не внутри».
+    except (OSError, ValueError):
+        return False
+
+
 def child_process_env(extra: Optional[dict[str, str]] = None) -> dict[str, str]:
     """
     «Чистые» переменные окружения для встроенного Python.
@@ -190,6 +243,25 @@ def child_process_env(extra: Optional[dict[str, str]] = None) -> dict[str, str]:
     for name in ("PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONEXECUTABLE", "VIRTUAL_ENV", "PIP_TARGET", "PIP_PREFIX", "CONDA_PREFIX"):
         # pop с значением по умолчанию не падает, если переменной нет.
         env.pop(name, None)
+    # Переменные Tcl/Tk: внутри собранного Auto-Compiler.exe они указывают на НАШИ файлы Tcl/Tk,
+    # и без очистки встроенный Python и PyInstaller взяли бы не свои графические компоненты.
+    for name in ("TCL_LIBRARY", "TK_LIBRARY", "TKPATH", "TIX_LIBRARY"):
+        # Удаляем, если есть.
+        env.pop(name, None)
+    # Служебные переменные загрузчика PyInstaller (_PYI_*, _MEIPASS2) не должны «протекать» в дочерние процессы.
+    for name in [key for key in env if key.upper().startswith(("_PYI_", "_MEIPASS"))]:
+        # Удаляем каждую найденную.
+        env.pop(name, None)
+    # Просим любые запущенные нами PyInstaller-программы стартовать «с чистого листа» (PyInstaller ≥ 6.9).
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    # Папка распаковки собранного Auto-Compiler.exe (если мы в нём).
+    bundle = frozen_bundle_dir()
+    # Убираем её из PATH, чтобы дочерние программы не находили там наши DLL.
+    if bundle is not None and env.get("PATH"):
+        # Разбиваем PATH на части и оставляем только «чужие» папки.
+        parts = [part for part in env["PATH"].split(os.pathsep) if part and not _is_inside(Path(part), bundle)]
+        # Собираем PATH обратно.
+        env["PATH"] = os.pathsep.join(parts)
     # Принудительный UTF-8 во всех дочерних Python-процессах.
     env["PYTHONUTF8"] = "1"
     # Кодировка стандартных потоков ввода-вывода.
@@ -357,6 +429,8 @@ def run_process(
         cancel.raise_if_cancelled()
     # Последние строки вывода (deque сам выбрасывает самые старые).
     tail: deque[str] = deque(maxlen=tail_size)
+    # Внутри собранного Auto-Compiler.exe — стандартный поиск DLL для запускаемых программ.
+    sanitize_frozen_environment()
     # Параметры запуска: скрытое окно в Windows.
     popen_kwargs = hidden_subprocess_kwargs()
     # В Linux/macOS — собственная группа процессов, чтобы при отмене убить и всех «детей».
@@ -600,6 +674,8 @@ def reveal_in_explorer(path: str | Path) -> None:
 
     # Ветка для Windows.
     if IS_WINDOWS:
+        # Проводник — внешняя программа: не передаём ему настройки DLL собранного .exe.
+        sanitize_frozen_environment()
         # Для файла — открываем папку и выделяем сам файл.
         if target.is_file():
             # Проводник требует именно такой формат: explorer.exe /select,"путь" (одной строкой).
@@ -885,6 +961,11 @@ class PythonRuntime:
             # Маркер готовности существует.
             if (candidate / cls.MARKER_NAME).is_file():
                 return candidate
+        # Собранный Auto-Compiler.exe обычно лежит в «Загрузках» или на рабочем столе:
+        # не захламляем эту папку и не теряем среду при переносе .exe — храним её в профиле.
+        # (Портативный режим остаётся: если рядом с .exe уже есть готовая папка runtime, берём её.)
+        if is_frozen():
+            return fallback
         # Иначе выбираем портативный вариант, если в папку программы можно писать.
         return portable if is_dir_writable(program_root()) else fallback
 

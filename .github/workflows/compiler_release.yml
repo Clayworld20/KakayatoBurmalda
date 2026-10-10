@@ -1,0 +1,242 @@
+# ============================================================================ #
+#   Автоматическая сборка Auto-Compiler.exe на серверах GitHub (настоящая Windows) #
+# ============================================================================ #
+#
+# Что происходит при каждом запуске:
+#   1. GitHub выдаёт чистую виртуальную машину Windows и ставит на неё Python 3.12.
+#   2. Устанавливаются зависимости из requirements.txt и упаковщик PyInstaller.
+#   3. Компилятор упаковывается в один файл dist/Auto-Compiler.exe.
+#   4. САМОПРОВЕРКА: готовый Auto-Compiler.exe с нуля (скачивая встроенный Python с python.org)
+#      собирает тестовую программу tests/selftest/hello_app.py, после чего собранная программа
+#      запускается и подтверждает, что внутри есть customtkinter, Pillow, Tcl/Tk и файлы ресурсов.
+#   5. Если всё хорошо — Auto-Compiler.exe выкладывается для скачивания:
+#        * всегда — в «Artifacts» этого запуска (вкладка Actions, хранится 30 дней);
+#        * при публикации релиза — прикрепляется к нему (вкладка Releases, хранится всегда).
+#
+# Когда запускается:
+#   * при каждом push в любую ветку (кроме изменений только в .md-файлах);
+#   * вручную — кнопкой «Run workflow» на вкладке Actions (кнопка появляется, когда этот файл есть в ветке по умолчанию);
+#   * при публикации релиза на вкладке Releases — тогда .exe прикрепляется к этому релизу.
+
+# Название рабочего процесса на вкладке Actions.
+name: Сборка Auto-Compiler.exe
+
+# События, которые запускают сборку.
+on:
+  # Отправка коммитов в репозиторий.
+  push:
+    # Любая ветка.
+    branches: ["**"]
+    # Правки только документации не требуют пересборки.
+    paths-ignore: ["**.md"]
+  # Ручной запуск кнопкой «Run workflow».
+  workflow_dispatch:
+  # Публикация релиза на вкладке Releases.
+  release:
+    # Только когда релиз опубликован (а не сохранён как черновик).
+    types: [published]
+
+# По умолчанию — только чтение репозитория (принцип минимальных прав).
+permissions:
+  # Чтение кода.
+  contents: read
+
+# Новый push в ту же ветку отменяет устаревшую сборку, чтобы не тратить время.
+concurrency:
+  # Одна группа на ветку/тег.
+  group: compiler-release-${{ github.ref }}
+  # Отменять предыдущий незавершённый запуск.
+  cancel-in-progress: true
+
+# Задачи рабочего процесса.
+jobs:
+  # Единственная задача: сборка, самопроверка и публикация.
+  build:
+    # Название задачи в интерфейсе GitHub.
+    name: Сборка и самопроверка (Windows)
+    # Виртуальная машина с последней версией Windows Server.
+    runs-on: windows-latest
+    # Защита от зависания: не дольше 45 минут.
+    timeout-minutes: 45
+    # Права этой задачи: запись нужна только для прикрепления файла к релизу.
+    permissions:
+      # Загрузка файлов в релиз.
+      contents: write
+    # Все команды — в PowerShell 7.
+    defaults:
+      # Настройки шагов run.
+      run:
+        # Оболочка PowerShell.
+        shell: pwsh
+    # Переменные окружения для всех шагов.
+    env:
+      # Python пишет и читает файлы в UTF-8 (русские пути и логи).
+      PYTHONUTF8: "1"
+
+    # Шаги задачи.
+    steps:
+      # 1. Скачиваем код репозитория на виртуальную машину.
+      - name: Получение кода
+        # Официальное действие GitHub.
+        uses: actions/checkout@v7
+
+      # 2. Устанавливаем Python 3.12 (кэш pip ускоряет повторные сборки).
+      - name: Установка Python 3.12
+        # Официальное действие GitHub.
+        uses: actions/setup-python@v7
+        # Параметры.
+        with:
+          # Версия Python для упаковки компилятора.
+          python-version: "3.12"
+          # Кэшировать скачанные пакеты pip.
+          cache: pip
+          # Кэш зависит от списка зависимостей.
+          cache-dependency-path: requirements.txt
+
+      # 3. Ставим зависимости компилятора и упаковщик PyInstaller.
+      - name: Установка зависимостей и PyInstaller
+        # Команды PowerShell.
+        run: |
+          # Свежий pip.
+          python -m pip install --upgrade pip
+          # Зависимости самого компилятора (customtkinter).
+          python -m pip install -r requirements.txt
+          # Упаковщик (6.9+ понимает PYINSTALLER_RESET_ENVIRONMENT).
+          python -m pip install "pyinstaller>=6.9"
+          # Версии — в лог для истории.
+          python -m PyInstaller --version
+
+      # 4. Упаковываем компилятор в один .exe без консоли.
+      - name: Сборка Auto-Compiler.exe
+        # Команда сборки (+ --noconfirm и --clean: без вопросов и с чистым кэшем).
+        run: pyinstaller --onefile --noconsole --collect-data customtkinter main.py --name Auto-Compiler --noconfirm --clean
+
+      # 5. Проверяем, что файл появился, и считаем контрольную сумму.
+      - name: Проверка файла и контрольная сумма
+        # Команды PowerShell.
+        run: |
+          # Путь к готовому файлу.
+          $exe = "dist\Auto-Compiler.exe"
+          # Файла нет — сборка не удалась.
+          if (-not (Test-Path $exe)) { throw "Файл $exe не был создан" }
+          # SHA-256 — чтобы пользователь мог убедиться, что файл не подменён.
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          # Файл с контрольной суммой рядом с .exe.
+          "$hash *Auto-Compiler.exe" | Out-File -Encoding ascii "dist\Auto-Compiler.exe.sha256"
+          # Размер в мегабайтах.
+          $size = "{0:N1}" -f ((Get-Item $exe).Length / 1MB)
+          # Сообщение в лог.
+          Write-Host "Auto-Compiler.exe: $size МБ, SHA-256: $hash"
+          # Запоминаем для итоговой сводки.
+          "EXE_SIZE=$size" >> $env:GITHUB_ENV
+          # Контрольная сумма для итоговой сводки.
+          "EXE_SHA256=$hash" >> $env:GITHUB_ENV
+
+      # 6. Самопроверка: готовый Auto-Compiler.exe собирает тестовую программу на «чистой» Windows.
+      - name: Самопроверка — Auto-Compiler.exe собирает тестовую программу
+        # Скачивание встроенного Python и библиотек занимает несколько минут.
+        timeout-minutes: 30
+        # Команды PowerShell.
+        run: |
+          # Папка самопроверки во временной папке сервера.
+          $env:SELFTEST_DIR = Join-Path $env:RUNNER_TEMP "selftest"
+          # Копируем тестовый проект во временную папку (готовый .exe появится рядом с ним).
+          Copy-Item tests\selftest $env:SELFTEST_DIR -Recurse -Force
+          # Аргументы служебного режима --selftest (пути в кавычках — на случай пробелов).
+          $arguments = @(
+            "--selftest", "`"$env:SELFTEST_DIR\hello_app.py`"",
+            "--icon", "`"$env:SELFTEST_DIR\app.ico`"",
+            "--log", "`"$env:SELFTEST_DIR\build.log`"",
+            "--result-file", "`"$env:SELFTEST_DIR\result.txt`""
+          )
+          # Запускаем компилятор и ждём завершения (окна нет — он работает без интерфейса).
+          $compiler = Start-Process -FilePath "dist\Auto-Compiler.exe" -ArgumentList $arguments -Wait -PassThru
+          # Показываем подробный лог сборки.
+          if (Test-Path "$env:SELFTEST_DIR\build.log") { Get-Content "$env:SELFTEST_DIR\build.log" -Encoding utf8 }
+          # Аварийный лог (если компилятор упал до начала сборки).
+          if (Test-Path "autocompiler-selftest-crash.log") { Get-Content "autocompiler-selftest-crash.log" -Encoding utf8 }
+          # Ненулевой код — самопроверка провалена.
+          if ($compiler.ExitCode -ne 0) { throw "Auto-Compiler.exe не смог собрать тестовую программу (код $($compiler.ExitCode))" }
+          # Путь к собранной тестовой программе.
+          $built = (Get-Content "$env:SELFTEST_DIR\result.txt" -Encoding utf8 -Raw).Trim()
+          # Сообщаем, что получилось.
+          Write-Host "Собрана тестовая программа: $built"
+          # Файл отчёта тестовой программы.
+          $report = "$env:SELFTEST_DIR\report.txt"
+          # Запускаем собранную программу.
+          $app = Start-Process -FilePath $built -ArgumentList "`"$report`"" -Wait -PassThru
+          # Программа должна завершиться успешно и записать отчёт.
+          if ($app.ExitCode -ne 0 -or -not (Test-Path $report)) { throw "Собранная тестовая программа не запустилась (код $($app.ExitCode))" }
+          # Текст отчёта.
+          $text = Get-Content $report -Encoding utf8 -Raw
+          # Показываем отчёт.
+          Write-Host "Отчёт тестовой программы: $text"
+          # Отчёт должен начинаться с OK.
+          if (-not $text.StartsWith("OK")) { throw "Тестовая программа сообщила об ошибке" }
+
+      # 7. Логи самопроверки — для разбора, если что-то пошло не так.
+      - name: Сохранение логов самопроверки
+        # Выполняется всегда, даже после ошибки.
+        if: always()
+        # Официальное действие GitHub.
+        uses: actions/upload-artifact@v7
+        # Параметры.
+        with:
+          # Имя архива с логами.
+          name: selftest-logs
+          # Какие файлы взять.
+          path: |
+            ${{ runner.temp }}\selftest\*.log
+            ${{ runner.temp }}\selftest\*.txt
+            autocompiler-selftest-crash.log
+          # Не считать ошибкой отсутствие файлов.
+          if-no-files-found: ignore
+          # Логи храним неделю.
+          retention-days: 7
+
+      # 8. Готовый Auto-Compiler.exe — в Artifacts этого запуска (сам файл, без zip-архива).
+      - name: Публикация Auto-Compiler.exe в Artifacts
+        # Официальное действие GitHub.
+        uses: actions/upload-artifact@v7
+        # Параметры.
+        with:
+          # Загружаемый файл.
+          path: dist/Auto-Compiler.exe
+          # Без упаковки в zip: скачивается сразу .exe (имя артефакта = имя файла).
+          archive: false
+          # Нет файла — ошибка.
+          if-no-files-found: error
+          # Хранить 30 дней.
+          retention-days: 30
+
+      # 9. При публикации релиза — прикрепляем .exe и контрольную сумму к нему.
+      - name: Прикрепление к релизу
+        # Только для события «релиз опубликован».
+        if: github.event_name == 'release'
+        # Переменные для GitHub CLI.
+        env:
+          # Токен этого запуска (права contents: write заданы выше).
+          GH_TOKEN: ${{ github.token }}
+          # Тег релиза (через переменную — безопасно от подстановки кода).
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        # Загружаем файлы (--clobber заменяет старые при повторном запуске).
+        run: gh release upload "$env:RELEASE_TAG" "dist\Auto-Compiler.exe" "dist\Auto-Compiler.exe.sha256" --clobber --repo "$env:GITHUB_REPOSITORY"
+
+      # 10. Итоговая сводка на странице запуска.
+      - name: Итоговая сводка
+        # Команды PowerShell.
+        run: |
+          # Строки сводки в формате Markdown.
+          $lines = @(
+            "## ✅ Auto-Compiler.exe готов",
+            "",
+            "* Размер: **$env:EXE_SIZE МБ**",
+            "* SHA-256: ``$env:EXE_SHA256``",
+            "* Самопроверка пройдена: готовый компилятор собрал и запустил тестовую программу.",
+            "",
+            "Скачать: блок **Artifacts** внизу этой страницы → **Auto-Compiler.exe**."
+          )
+          # Для релиза — ещё и ссылка на релиз.
+          if ("${{ github.event_name }}" -eq "release") { $lines += "Файл также прикреплён к релизу: ${{ github.event.release.html_url }}" }
+          # Записываем сводку.
+          $lines -join "`n" >> $env:GITHUB_STEP_SUMMARY

@@ -7,6 +7,10 @@
     1. Проверяет версию Python.
     2. Если библиотеки интерфейса customtkinter нет — сам тихо устанавливает её через pip.
     3. Запускает главное окно, защищая запуск от любых сбоев.
+
+Служебный режим (для автоматической проверки в GitHub Actions, пользователю не нужен):
+    Auto-Compiler.exe --selftest путь\к\скрипту.py --log лог.txt [--icon файл.ico] [--onedir] [--console]
+    Выполняет всю сборку БЕЗ окна, пишет подробный лог в файл и завершается с кодом 0 (успех) или 1.
 """
 
 # Отложенная обработка аннотаций типов.
@@ -108,6 +112,107 @@ def ensure_customtkinter() -> bool:
         return False
 
 
+def run_selftest(argv: list[str]) -> int:
+    """Служебный режим: собрать скрипт без окна (для проверки готового Auto-Compiler.exe в GitHub Actions)."""
+    # Импорты внутри функции: обычному запуску с окном они не нужны.
+    import argparse
+    # threading — сборка идёт в фоне, а главный поток пишет лог.
+    import threading
+    # time — пауза между чтениями событий.
+    import time
+
+    # Описание параметров командной строки.
+    parser = argparse.ArgumentParser(prog="Auto-Compiler --selftest", description="Сборка без окна (самопроверка).")
+    # Путь к собираемому скрипту.
+    parser.add_argument("script", help="главный .py-файл программы")
+    # Файл подробного лога.
+    parser.add_argument("--log", default="autocompiler-selftest.log", help="куда записать лог сборки")
+    # Файл, куда записать путь к готовому .exe.
+    parser.add_argument("--result-file", default="", help="куда записать путь к готовому .exe")
+    # Иконка (необязательно).
+    parser.add_argument("--icon", default="", help="иконка .ico")
+    # Режим «папка» вместо одного файла.
+    parser.add_argument("--onedir", action="store_true", help="собрать папку вместо одного .exe")
+    # Оставить окно консоли у собранной программы.
+    parser.add_argument("--console", action="store_true", help="не скрывать консоль собранной программы")
+    # Неверные параметры: argparse вызывает SystemExit — превращаем его в код ошибки 2.
+    try:
+        # Разбираем параметры.
+        args = parser.parse_args(argv)
+    # Ошибка в параметрах.
+    except SystemExit:
+        return 2
+
+    # Файл лога (папку создаём, если её нет).
+    log_path = Path(args.log).resolve()
+    # Создаём папку для лога.
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    # Модули компилятора импортируем здесь: окно (customtkinter) этому режиму не нужно.
+    from autocompiler.core.pipeline import BuildPipeline, BuildSettings
+    # Шина событий и типы событий.
+    from autocompiler.utils.event_bus import EventBus, EventKind
+
+    # Настройки сборки — как если бы пользователь выбрал их в окне.
+    settings = BuildSettings(
+        script_path=Path(args.script).resolve(),
+        icon_path=Path(args.icon).resolve() if args.icon else None,
+        hide_console=not args.console,
+        one_file=not args.onedir,
+    )
+    # Шина событий (вместо окна её читает этот цикл).
+    bus = EventBus()
+    # Конвейер сборки.
+    pipeline = BuildPipeline(settings, bus)
+    # Фоновый поток со сборкой.
+    worker = threading.Thread(target=pipeline.run, name="SelftestBuild", daemon=True)
+    # Итог: успех и путь к .exe.
+    result: dict = {"success": False, "output_path": None}
+
+    # Открываем лог в UTF-8 (русский текст).
+    with log_path.open("w", encoding="utf-8") as log:
+        # Запускаем сборку.
+        worker.start()
+        # Читаем события, пока поток жив (и ещё раз после его завершения).
+        while True:
+            # Жив ли поток — проверяем ДО чтения, чтобы не потерять последние события.
+            alive = worker.is_alive()
+            # Забираем накопившиеся события.
+            for event in bus.drain(1000):
+                # Данные события.
+                data = event.payload
+                # Время события.
+                stamp = event.created_at.strftime("%H:%M:%S")
+                # Строка лога.
+                if event.kind == EventKind.LOG:
+                    log.write(f"[{stamp}] {str(data['level'].value).upper():8} {data['text']}\n")
+                # Красное окно ошибки — пишем все его части.
+                elif event.kind == EventKind.ERROR:
+                    log.write(f"[{stamp}] !!! ОШИБКА: {data['title']}\n    {data['message']}\n    Совет: {data['hint']}\n")
+                    # Технические подробности (если есть).
+                    if data.get("details"):
+                        log.write("    Подробности:\n" + "\n".join("      " + line for line in str(data["details"]).splitlines()) + "\n")
+                # Завершение сборки — запоминаем итог.
+                elif event.kind == EventKind.FINISHED:
+                    result.update(success=data["success"], output_path=data["output_path"])
+                    # Итоговая строка.
+                    log.write(f"[{stamp}] ИТОГ: {data['summary']}\n")
+            # Сразу сбрасываем на диск, чтобы лог был виден даже при зависании.
+            log.flush()
+            # Поток завершился и все события прочитаны — выходим.
+            if not alive:
+                break
+            # Небольшая пауза, чтобы не грузить процессор.
+            time.sleep(0.2)
+        # Итоговая машинно-читаемая строка.
+        log.write(f"RESULT={'OK' if result['success'] else 'FAIL'} EXE={result['output_path'] or ''}\n")
+
+    # Путь к готовому .exe — в отдельный файл (удобно читать из скрипта CI).
+    if args.result_file and result["output_path"]:
+        Path(args.result_file).write_text(str(result["output_path"]), encoding="utf-8")
+    # Код завершения: 0 — успех, 1 — ошибка.
+    return 0 if result["success"] else 1
+
+
 def set_windows_app_id() -> None:
     """Попросить Windows показывать на панели задач нашу иконку, а не иконку Python."""
     # Только для Windows.
@@ -135,6 +240,19 @@ def main() -> int:
         )
         # Код ошибки.
         return 1
+
+    # Служебный режим самопроверки (без окна) — для GitHub Actions.
+    if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
+        # Ошибки самопроверки не должны превращаться в «вечное» окно ошибки на сервере сборки.
+        try:
+            # Запускаем сборку без окна.
+            return run_selftest(sys.argv[2:])
+        # Любой непредвиденный сбой — код 1 и текст ошибки в файл рядом.
+        except Exception:  # noqa: BLE001
+            # Пишем трассировку в файл, т.к. консоли у собранного .exe нет.
+            Path("autocompiler-selftest-crash.log").write_text(traceback.format_exc(), encoding="utf-8")
+            # Код ошибки.
+            return 1
 
     # Проверка/установка библиотеки интерфейса.
     if not ensure_customtkinter():
