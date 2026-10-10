@@ -5,7 +5,9 @@
 #    1) выбрать "мозг": Claude -> OpenAI -> локальная модель из Ollama;
 #    2) делать скриншоты экрана (pyautogui) и показывать их мозгу;
 #    3) выполнять решения мозга: клики мышкой, набор текста, нажатия клавиш;
-#    4) рассказывать о каждом шаге простым русским язымом (функция on_log).
+#    4) рассказывать о каждом шаге простым русским языком (функция on_log);
+#    5) мгновенно останавливаться по глобальной клавише Esc — даже если
+#       окно программы свернуто (библиотека keyboard).
 #
 #  Режимы работы робота (их показываем во вкладке "Робот"):
 #    MODE_REPORT  — "Напиши отчет": мозг пишет текст, робот сохраняет файл.
@@ -21,6 +23,13 @@ import tempfile    # создание временных файлов для с�
 import threading   # отдельный поток, чтобы робот не замораживал окно
 import time        # паузы между действиями робота
 
+# Библиотека keyboard ловит клавиши ВО ВСЕЙ системе (даже когда окно свернуто).
+# Подключаем мягко: если её вдруг нет — робот всё равно работает, просто без Esc.
+try:
+    import keyboard
+except ImportError:
+    keyboard = None                       # стоп-кран Esc будет недоступен
+
 from services import config_manager    # чтение сохранённых API-ключей
 from services import netcheck          # проверка: запущена ли Ollama
 from services import cloud_api         # вопросы к Claude / OpenAI
@@ -33,6 +42,11 @@ MODE_CONTROL = "control"               # режим "Полное управле
 
 # Защита от зацикливания: максимум действий за один запуск робота
 MAX_STEPS = 8
+
+# Глобальная клавиша аварийной остановки (захотите другую — поменяйте здесь,
+# например "ctrl+alt+s"). Работает во всех программах, пока робот запущен.
+HOTKEY = "esc"
+EMERGENCY_MESSAGE = "⏹ Аварийная остановка клавишей Esc!"
 
 # Задание для режима "Чистка рабочего стола" (безопасное и понятное)
 CLEANUP_GOAL = (
@@ -88,6 +102,8 @@ class AgentRuntime:
         self.thread = None                    # поток, в котором робот работает
         self.mode = None                      # выбранный режим работы
         self.task = ""                        # задание пользователя своими словами
+        self.hotkey_handle = None             # обработчик клавиши Esc (чтобы снять его потом)
+        self.emergency = False                # флаг: остановка была аварийной (Esc)?
 
     # ------------------------------------------------------------- УПРАВЛЕНИЕ
 
@@ -100,8 +116,10 @@ class AgentRuntime:
         if self.is_running():                 # робот уже работает
             return False                      # второй запуск не нужен
         self.stop_event.clear()               # сбрасываем "стоп-кран"
+        self.emergency = False                # прошлая остановка нас больше не волнует
         self.mode = mode                      # запоминаем режим
         self.task = task.strip()              # и задание (без лишних пробелов)
+        self.install_hotkey()                 # включаем глобальный стоп-кран Esc
         self.thread = threading.Thread(       # робот живёт в отдельном потоке
             target=self.run,
             daemon=True,                      # закроется вместе с программой
@@ -120,6 +138,48 @@ class AgentRuntime:
         except Exception:
             pass                              # окно закрыто — молча пропускаем
 
+    # ------------------------------------------------------------- СТОП-КРАН ESC
+
+    def install_hotkey(self):
+        """Включает глобальную клавишу Esc на всё время работы робота."""
+        self.hotkey_handle = None             # пока обработчик не установлен
+        if keyboard is None:                  # библиотеки нет — работаем без хоткея
+            self.log("info", "Клавиша Esc недоступна: для остановки жмите кнопку «Остановить».")
+            return
+        try:
+            # add_hotkey ловит клавишу ВО ВСЕЙ системе, а не только в нашем окне,
+            # поэтому сработает даже из игры или из свернутой программы
+            self.hotkey_handle = keyboard.add_hotkey(HOTKEY, self.on_emergency_hotkey)
+        except Exception:
+            self.hotkey_handle = None         # например, не хватило прав — живём без хоткея
+            self.log("info", "Клавиша Esc недоступна: для остановки жмите кнопку «Остановить».")
+
+    def on_emergency_hotkey(self):
+        """Вызывается при нажатии Esc в ЛЮБОЙ программе. Должен быть очень быстрым."""
+        if self.stop_event.is_set():          # робот уже останавливается
+            return
+        self.emergency = True                 # помечаем: остановка аварийная
+        self.stop_event.set()                 # дергаем "стоп-кран" — цикл увидит его мгновенно
+        self.log("error", EMERGENCY_MESSAGE)  # сразу пишем в трансляцию, не дожидаясь цикла
+
+    def uninstall_hotkey(self):
+        """Убирает перехват Esc, чтобы клавиша снова работала как обычно."""
+        if keyboard is not None and self.hotkey_handle is not None:
+            try:
+                keyboard.remove_hotkey(self.hotkey_handle)   # снимаем перехват
+            except Exception:
+                pass                          # уже снят — не страшно
+        self.hotkey_handle = None
+
+    def check_stop(self):
+        """Проверяет, просили ли робота остановиться. True = стоп (лог уже написан)."""
+        if not self.stop_event.is_set():      # никто не просил остановку
+            return False
+        if not self.emergency:                # обычная остановка кнопкой...
+            self.log("info", "Останавливаюсь по вашей команде.")  # ...объясняем в логе
+        # при аварийной (Esc) сообщение уже написал обработчик клавиши
+        return True
+
     # ------------------------------------------------------------- ГЛАВНЫЙ ЦИКЛ
 
     def run(self):
@@ -130,6 +190,8 @@ class AgentRuntime:
                 self.log("error", "Робот не смог найти мозг. Проверьте вкладку «Мозг».")
                 return
             self.log("info", f"Мой мозг: {brain['label']}")
+            if keyboard is not None:          # подсказка про аварийный стоп
+                self.log("info", "Подсказка: клавиша Esc — мгновенный стоп, даже если окно свернуто.")
 
             if self.mode == MODE_REPORT:      # режим "Напиши отчет"
                 self.do_report(brain)
@@ -138,6 +200,7 @@ class AgentRuntime:
         except Exception as error:            # любая непредвиденная ситуация
             self.log("error", f"Непредвиденная ошибка: {error}")
         finally:
+            self.uninstall_hotkey()           # снимаем перехват Esc в любом случае
             # Как бы ни закончилось — сообщаем окну, что робот выключается
             try:
                 self.on_finished()
@@ -207,6 +270,8 @@ class AgentRuntime:
         text = self.ask_brain(brain, prompt)  # мозг пишет текст отчёта
         if text is None:                      # не ответил — выходим (ошибка уже в логе)
             return
+        if self.check_stop():                 # пока мозг писал, нажали остановку?
+            return
 
         self.log("success", "Отчёт готов!\n" + text)   # показываем отчёт целиком
         self.log("action", "Сохраняю отчёт на рабочий стол...")
@@ -271,8 +336,7 @@ class AgentRuntime:
         screen_width, screen_height = pyautogui.size()
 
         for step in range(1, MAX_STEPS + 1):              # не больше MAX_STEPS шагов
-            if self.stop_event.is_set():                  # пользователь нажал "Стоп"?
-                self.log("info", "Останавливаюсь по вашей команде.")
+            if self.check_stop():                         # нажали Esc или кнопку "Стоп"?
                 return
 
             self.log("action", f"Делаю скриншот экрана (шаг {step} из {MAX_STEPS})...")
@@ -287,6 +351,8 @@ class AgentRuntime:
             reply = self.ask_brain(brain, prompt, image_path)
             if reply is None:                             # мозг не ответил
                 return                                    # ошибка уже в логе
+            if self.check_stop():                         # пока мозг думал, нажали стоп?
+                return
 
             decision = parse_decision(reply)              # разбираем решение мозга
             if decision is None:
@@ -299,14 +365,17 @@ class AgentRuntime:
                 self.log("success", "Готово! " + (decision["text"] or "Задание выполнено."))
                 return
 
-            if self.stop_event.is_set():                  # проверяем "стоп" перед действием
-                self.log("info", "Останавливаюсь по вашей команде.")
+            if self.check_stop():                         # проверяем "стоп" перед действием
                 return
 
             if not self.perform_action(decision, screen_width, screen_height, image_width, image_height):
                 return                                    # действие не удалось — стоп
 
-            time.sleep(1)                                 # секунда тишины между шагами
+            # Секунда тишины между шагами. Хитрость: wait просыпается МГНОВЕННО,
+            # если во время паузы нажали Esc или кнопку остановки
+            if self.stop_event.wait(1):
+                self.check_stop()                         # написать сообщение об остановке
+                return
 
         # Сюда попадаем, если шаги закончились, а "done" так и не пришёл
         self.log("info", f"Достиг лимита в {MAX_STEPS} шагов и остановился, чтобы ничего не сломать.")

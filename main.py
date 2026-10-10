@@ -22,6 +22,7 @@ REQUIRED_LIBRARIES = {
     "pyautogui":     "pyautogui",      # управление мышкой и клавиатурой (для робота)
     "requests":      "requests",       # общение с нейросетями через интернет
     "pillow":        "PIL",            # работа со скриншотами (подключается как PIL)
+    "keyboard":      "keyboard",       # глобальные горячие клавиши (стоп-кран Esc)
 }
 
 
@@ -222,7 +223,7 @@ class App(ctk.CTk):
         # --- Подпись версии в самом низу панели ----------------------------------
         version = ctk.CTkLabel(
             self.sidebar,
-            text="Версия 0.4 · Шаг 4",             # текущий этап разработки
+            text="Версия 0.5 · Финал",             # текущий этап разработки
             font=ctk.CTkFont(family=theme.FONT_FAMILY, size=11),
             text_color=theme.COLOR_MUTED,          # почти незаметный серый
         )
