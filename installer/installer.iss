@@ -565,7 +565,26 @@ begin
   end;
 end;
 
+// Найти Python «нашей» ветки (3.12 — та же, что ставит установщик) в одной ветке реестра.
+function TryPreferredBranch(const Root: HKEY; const RootName: String): Boolean;
+begin
+  // Обычная 64-битная сборка (раздел «3.12»)…
+  Result := TryPythonKey(Root, RootName, PythonBranch);
+  // …или 32-битная (раздел «3.12-32»)…
+  if not Result then
+    // Пробуем 32-битную.
+    Result := TryPythonKey(Root, RootName, PythonBranch + '-32');
+  // …или ARM64 (раздел «3.12-arm64»).
+  if not Result then
+    // Пробуем ARM64.
+    Result := TryPythonKey(Root, RootName, PythonBranch + '-arm64');
+end;
+
 // Найти лучший установленный Python во всех ветках реестра. True — найден.
+// Порядок предпочтения:
+//   1) Python 3.12 (та же ветка, что ставит установщик): проверенная версия, и при обновлении
+//      программы ярлыки продолжат запускать тот же Python;
+//   2) если 3.12 нет — самый новый подходящий Python 3.10+ с tkinter.
 function DetectPython: Boolean;
 var
   // Нашли ли хоть один подходящий.
@@ -583,6 +602,43 @@ begin
   Found := False;
   // Начальная версия для сравнения.
   BestVersion := 0;
+  // Сначала — Python 3.12: «только для меня», затем «для всех пользователей».
+  // Проверяем по очереди и останавливаемся на первом найденном (отдельными if, чтобы следующая
+  // проверка не перезаписала уже найденный Python).
+  if IsWin64 then
+  begin
+    // 64-битная Windows: «только для меня», 64-битная половина реестра.
+    Found := TryPreferredBranch(HKCU64, 'HKCU64');
+    // «Только для меня», 32-битная половина.
+    if not Found then
+      // Проверяем.
+      Found := TryPreferredBranch(HKCU32, 'HKCU32');
+    // «Для всех пользователей», 64-битная половина.
+    if not Found then
+      // Проверяем.
+      Found := TryPreferredBranch(HKLM64, 'HKLM64');
+    // «Для всех пользователей», 32-битная половина.
+    if not Found then
+      // Проверяем.
+      Found := TryPreferredBranch(HKLM32, 'HKLM32');
+  end
+  else
+  begin
+    // 32-битная Windows: «только для меня».
+    Found := TryPreferredBranch(HKCU, 'HKCU');
+    // «Для всех пользователей».
+    if not Found then
+      // Проверяем.
+      Found := TryPreferredBranch(HKLM, 'HKLM');
+  end;
+  // Нашли 3.12 — дальше не ищем.
+  if Found then
+  begin
+    // Возвращаем успех.
+    Result := True;
+    // Выходим.
+    Exit;
+  end;
   // 64-битная Windows: реестр разделён на 64- и 32-битную части — смотрим обе.
   if IsWin64 then
   begin

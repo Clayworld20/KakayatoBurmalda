@@ -389,6 +389,9 @@ jobs:
             $log = Join-Path $env:RUNNER_TEMP "setup-nopypi.log"
             # Засекаем время.
             $watch = [Diagnostics.Stopwatch]::StartNew()
+            # Отключаем кэш pip для этой проверки (иначе pip поставит библиотеки из кэша и без интернета;
+            # переменная окружения передаётся установщику, а от него — pip).
+            $env:PIP_NO_CACHE_DIR = "1"
             # Обычная тихая установка (Python уже установлен — его найдут в реестре).
             $p = Start-Process "installer\Output\AutoCompiler-Setup.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/LOG=`"$log`"" -Wait -PassThru
             # Сколько секунд заняло.
@@ -405,8 +408,8 @@ jobs:
             function Fail([string]$message) { Write-Host "::error title=Тест «нет интернета» (pypi.org)::$message"; throw $message }
             # Установка программы должна завершиться успешно (шаг с библиотеками пропускается).
             if ($p.ExitCode -ne 0) { Fail "Установщик завершился с кодом $($p.ExitCode)" }
-            # Python должен быть найден, а не скачан заново.
-            if (-not (Get-Content $log -Encoding utf8 | Where-Object { $_ -match 'Найден подходящий Python' })) { Fail "Установщик не нашёл уже установленный Python" }
+            # Должен быть выбран уже установленный Python 3.12 (а не более новый Python сервера).
+            if (-not (Get-Content $log -Encoding utf8 | Where-Object { $_ -match 'Найден подходящий Python 3\.12 ' })) { Fail "Установщик выбрал не Python 3.12" }
             # Установщик должен был распознать именно сетевую проблему.
             if (-not (Get-Content $log -Encoding utf8 | Where-Object { $_ -match 'Сетевая ошибка: 1' })) { Fail "Сетевая ошибка pip не распознана" }
             # Файлы программы и ярлык на месте.
