@@ -1,0 +1,92 @@
+# ============================================================================
+#  АВТОСБОРКА УСТАНОВЩИКА "AI AGENT MANAGER" НА GITHUB ACTIONS
+#  --------------------------------------------------------------------------
+#  Что происходит при пуше тега (например v1.0.0) или ручном запуске:
+#    1) GitHub включает виртуальный компьютер с Windows (windows-latest);
+#    2) ставит туда свежий Inno Setup 6 (в версии 6.6+ есть тёмная тема);
+#    3) компилирует наш agent_manager_setup.iss -> AI-Agent-Manager-Setup.exe
+#       (на этапе компиляции Inno сам скачает установщик Python с python.org
+#       и зашьёт его внутрь — это делает флаг DownloadKompatibelAndOverwrite);
+#    4) прикрепляет готовый файл к артефактам запуска (Artifacts);
+#    5) для тегов вида v1.0.0 — публикует файл в разделе Releases (Релизы).
+# ============================================================================
+
+# Имя сборочной линии — видно на вкладке "Actions"
+name: Сборка установщика AI Agent Manager
+
+# Когда запускать сборку
+on:
+  push:
+    tags:
+      - 'v*'              # любой тег, начинающийся с "v" (v1.0.0, v2.5.1 и т.д.)
+  workflow_dispatch:      # плюс кнопка "Run workflow" на вкладке Actions
+
+# Разрешение: релизы создаются от имени сборочной линии
+permissions:
+  contents: write
+
+jobs:
+  build-installer:
+    # Виртуальный компьютер с Windows
+    runs-on: windows-latest
+    name: Компиляция установщика (Inno Setup)
+
+    steps:
+      # Шаг 1. Скачиваем исходники проекта на виртуальный компьютер
+      - name: Забираем исходники из репозитория
+        uses: actions/checkout@v4
+
+      # Шаг 2. Ставим свежий Inno Setup 6 через Chocolatey.
+      # На новых образах windows-latest Inno Setup больше не предустановлен,
+      # а старые версии (6.4) не умеют тёмную тему WizardStyle=dark
+      - name: Ставим свежий Inno Setup 6 (6.6+ с тёмной темой)
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      # Шаг 3. Компилируем установщик.
+      # ISCC.exe — консольный компилятор Inno Setup; он читает наш .iss
+      # и создаёт Output\AI-Agent-Manager-Setup.exe
+      - name: Компилируем установщик (agent_manager_setup.iss -> .exe)
+        shell: cmd
+        run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" agent_manager_setup.iss'
+
+      # Шаг 4. Показываем содержимое папки Output в логе (удобно проверять)
+      - name: Смотрим, что получилось
+        shell: pwsh
+        run: Get-ChildItem "Output"
+
+      # Шаг 5. Прикрепляем готовый установщик к артефактам ЗАПУСКА сборки.
+      # Скачать: вкладка Actions -> нужный запуск -> раздел Artifacts
+      - name: Прикрепляем установщик к артефактам запуска
+        uses: actions/upload-artifact@v4
+        with:
+          name: AI-Agent-Manager-Setup
+          path: Output/AI-Agent-Manager-Setup.exe
+          if-no-files-found: error          # если файла нет — сборка считается проваленной
+
+      # Шаг 6. Публикуем установщик в разделе Releases (только когда сборку
+      # вызвал тег, а не обычный пуш)
+      - name: Публикуем установщик в GitHub Releases
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Output/AI-Agent-Manager-Setup.exe
+          name: AI Agent Manager ${{ github.ref_name }}
+          body: |
+            ## 🚀 Как установить (2 минуты)
+
+            1. Скачайте файл **AI-Agent-Manager-Setup.exe** ниже.
+            2. Запустите его двойным кликом. Если Windows покажет синее окно
+               «Система защитила ваш компьютер» — нажмите «Подробнее» →
+               «Выполнить в любом случае» (так бывает у всех новых программ
+               без платной подписи кода).
+            3. Дальше всё автоматически: установщик сам настроит Python
+               (если его нет) и скачает библиотеки готовыми сборками.
+
+            ## ⏹ Аварийный стоп робота
+            Во время работы робота нажмите **Esc** — он мгновенно остановится.
+
+            ## 📌 Системные требования
+            Windows 10/11 (64-бит), ~500 МБ на диске, интернет для первой установки.
+          draft: false                      # релиз сразу виден (не черновик)
+          prerelease: false                 # это стабильный релиз
