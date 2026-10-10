@@ -1,6 +1,7 @@
 # ⚙ Auto-Compiler — Python → .exe в один клик
 
 [![Сборка Auto-Compiler.exe](https://github.com/Clayworld20/KakayatoBurmalda/actions/workflows/compiler_release.yml/badge.svg)](https://github.com/Clayworld20/KakayatoBurmalda/actions/workflows/compiler_release.yml)
+[![Сборка установщика](https://github.com/Clayworld20/KakayatoBurmalda/actions/workflows/installer.yml/badge.svg)](https://github.com/Clayworld20/KakayatoBurmalda/actions/workflows/installer.yml)
 
 Программа с простым тёмным интерфейсом, которая превращает любой Python-скрипт в готовый `.exe`.
 Рассчитана на людей без опыта программирования: никакой командной строки, только кнопки.
@@ -22,6 +23,37 @@
 
 При первой сборке компилятор скачает встроенный Python (~15–45 МБ) в
 `%LOCALAPPDATA%\AutoCompiler\runtime` — дальше всё работает быстро.
+
+## 📦 Установщик для Windows (AutoCompiler-Setup.exe)
+
+Второй способ распространения — обычный установщик с мастером (Inno Setup 7). Сценарий: [`installer/installer.iss`](installer/installer.iss).
+
+Что видит пользователь: тёмный мастер → лицензия → выбор папки → галочка «значок на рабочем столе» → «Установить».
+Что происходит внутри:
+
+1. **Python.** До копирования файлов установщик ищет в реестре (PEP 514) рабочий Python 3.10+ с tkinter,
+   предпочитая 3.12. Если его нет — скачивает официальный `python-3.12.10-*.exe` с python.org
+   (с проверкой SHA-256) и ставит скрыто: `/quiet InstallAllUsers=0 PrependPath=1 Include_tcltk=1 …`.
+   Пользователь видит только полосу прогресса.
+2. **Файлы.** `autocompiler\`, `main.py`, `requirements.txt` копируются в `%LOCALAPPDATA%\Programs\Auto-Compiler`
+   («только для меня», без прав администратора) или в `Program Files` («для всех пользователей»).
+3. **Библиотеки.** Секция `[Run]` один раз выполняет `pip install -r requirements.txt` в фоне; ход установки
+   показывается понятными строками, результат проверяется, при сбое — вежливое окно «Повторить / Пропустить».
+4. **Ярлыки** на рабочем столе и в меню «Пуск» запускают `pythonw.exe main.py` — без консольного окна.
+
+Без интернета установщик не зависает: у загрузки есть кнопка «Прервать» и сторож (45 с без данных — остановка),
+ошибки объясняются простыми словами с кнопкой «Повторить». Это проверяется в CI тестами с заблокированными
+python.org и pypi.org.
+
+**Как собрать самому:** установите [Inno Setup 7.1+](https://jrsoftware.org/isdl.php), откройте
+`installer\installer.iss` и нажмите **Ctrl+F9** (или `ISCC installer\installer.iss`).
+Готовый файл: `installer\Output\AutoCompiler-Setup.exe`. Версия берётся из `autocompiler/__init__.py` автоматически.
+
+**Готовая сборка:** вкладка **Actions** → «Сборка установщика AutoCompiler-Setup.exe» → **Artifacts**;
+при публикации релиза установщик прикрепляется к нему автоматически.
+
+Оформление (значок, картинки мастера) создаёт `installer/make_assets.py` (Pillow); текст лицензии —
+`installer/license_ru.txt` (проверьте и при необходимости замените на свой).
 
 ## Как это работает
 
@@ -89,7 +121,14 @@ python main.py
 ```
 KakayatoBurmalda/
 ├── .github/workflows/
-│   └── compiler_release.yml    # Автосборка Auto-Compiler.exe на Windows, самопроверка, публикация
+│   ├── compiler_release.yml    # Автосборка Auto-Compiler.exe на Windows, самопроверка, публикация
+│   └── installer.yml           # Сборка и полная проверка установщика AutoCompiler-Setup.exe
+├── installer/
+│   ├── installer.iss           # Сценарий Inno Setup: мастер, Python, файлы, pip, ярлыки pythonw
+│   ├── license_ru.txt          # Лицензионное соглашение (страница мастера)
+│   ├── autocompiler.ico        # Значок программы и установщика
+│   ├── assets/                 # Картинки мастера под масштабы экрана 100–200 %
+│   └── make_assets.py          # Генератор значка и картинок (Pillow)
 ├── main.py                     # Точка входа: проверка Python, автоустановка customtkinter, запуск окна
 │                               # (+ служебный режим --selftest для проверки в GitHub Actions)
 ├── requirements.txt            # Зависимости самого компилятора
