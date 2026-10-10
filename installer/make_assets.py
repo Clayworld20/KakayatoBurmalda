@@ -57,7 +57,7 @@ ICO_SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256]
 def lerp(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> tuple[int, int, int]:
     """Плавный переход между двумя цветами: t=0 — цвет a, t=1 — цвет b."""
     # Смешиваем каждый канал (красный, зелёный, синий) отдельно.
-    return tuple(round(x + (y - x) * t) for x, y in zip(a, b))  # type: ignore[return-value]
+    return tuple(round(x + (y - x) * t) for x, y in zip(a, b, strict=True))  # type: ignore[return-value]
 
 
 def vertical_gradient(size: tuple[int, int], top: tuple[int, int, int], bottom: tuple[int, int, int]) -> Image.Image:
