@@ -950,8 +950,17 @@ def _autocompiler_pip_bridge():
         # Читаем код pip.
         with open(candidate, encoding="utf-8") as handle:
             code = handle.read()
+        # Запоминаем пути ДО кода pip.
+        before = list(sys.path)
         # Выполняем его: pip сам уберёт системные пакеты и подключит папку со сборщиком.
         exec(compile(code, candidate, "exec"), {"__name__": "__pip_build_env__", "__file__": candidate})
+        # В портативном Python корень папки считается «системным site-packages», и pip убирает его,
+        # а там лежат модули стандартной библиотеки (_socket.pyd, _ctypes.pyd, pyexpat.pyd…).
+        # Возвращаем в конец списка всё убранное, КРОМЕ папок site-packages (изоляция сохраняется).
+        for path in before:
+            # Путь убран pip и это не папка установленных библиотек — возвращаем.
+            if path not in sys.path and os.path.basename(os.path.normpath(path)).lower() != "site-packages":
+                sys.path.append(path)
         # Одного файла достаточно.
         return
 
