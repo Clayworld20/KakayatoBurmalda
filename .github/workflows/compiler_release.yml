@@ -151,8 +151,22 @@ jobs:
           )
           # Запускаем компилятор и ждём завершения (окна нет — он работает без интерфейса).
           $compiler = Start-Process -FilePath "dist\Auto-Compiler.exe" -ArgumentList $arguments -Wait -PassThru
+          # Функция: показать текст как аннотацию вверху страницы запуска (переводы строк кодируются как %0A).
+          function Show-Notice([string]$title, [string[]]$lines) {
+            # Экранируем спецсимволы формата команд GitHub.
+            $body = ($lines -join "`n").Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            # Печатаем команду-аннотацию.
+            Write-Host "::notice title=$title::$body"
+          }
           # Показываем подробный лог сборки.
-          if (Test-Path "$env:SELFTEST_DIR\build.log") { Get-Content "$env:SELFTEST_DIR\build.log" -Encoding utf8 }
+          if (Test-Path "$env:SELFTEST_DIR\build.log") {
+            # Весь лог — в вывод шага.
+            Get-Content "$env:SELFTEST_DIR\build.log" -Encoding utf8
+            # Главные строки (шаги, успехи, предупреждения, ошибки) — в аннотацию.
+            $key = Get-Content "$env:SELFTEST_DIR\build.log" -Encoding utf8 | Where-Object { $_ -match '\] (STEP|SUCCESS|WARNING|ERROR) ' -or $_ -match '^RESULT=' }
+            # Публикуем аннотацию.
+            Show-Notice "Самопроверка: ход сборки тестовой программы" $key
+          }
           # Аварийный лог (если компилятор упал до начала сборки).
           if (Test-Path "autocompiler-selftest-crash.log") { Get-Content "autocompiler-selftest-crash.log" -Encoding utf8 }
           # Ненулевой код — самопроверка провалена.
@@ -169,8 +183,8 @@ jobs:
           if ($app.ExitCode -ne 0 -or -not (Test-Path $report)) { throw "Собранная тестовая программа не запустилась (код $($app.ExitCode))" }
           # Текст отчёта.
           $text = Get-Content $report -Encoding utf8 -Raw
-          # Показываем отчёт.
-          Write-Host "Отчёт тестовой программы: $text"
+          # Показываем отчёт (и аннотацией вверху страницы запуска).
+          Show-Notice "Самопроверка: отчёт собранной тестовой программы" @($text.Trim())
           # Отчёт должен начинаться с OK.
           if (-not $text.StartsWith("OK")) { throw "Тестовая программа сообщила об ошибке" }
 
