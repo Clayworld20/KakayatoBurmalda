@@ -143,10 +143,22 @@ jobs:
       - name: Сборка AutoCompiler-Setup.exe
         # Команды PowerShell.
         run: |
-          # Компилируем (версия программы читается из autocompiler\__init__.py самим сценарием).
-          & $env:ISCC installer\installer.iss
-          # Ненулевой код — ошибка компиляции (текст ошибки — выше в логе).
-          if ($LASTEXITCODE -ne 0) { throw "ISCC завершился с кодом $LASTEXITCODE" }
+          # Компилируем (версия программы читается из autocompiler\__init__.py самим сценарием);
+          # весь вывод (и обычный, и ошибки) собираем, чтобы показать его.
+          $output = & $env:ISCC installer\installer.iss 2>&1 | ForEach-Object { "$_" }
+          # Код завершения компилятора.
+          $code = $LASTEXITCODE
+          # Весь вывод — в лог шага.
+          $output | ForEach-Object { Write-Host $_ }
+          # Ошибка компиляции — показываем последние строки аннотацией вверху страницы запуска.
+          if ($code -ne 0) {
+            # Последние 25 строк вывода, переводы строк кодируются как %0A.
+            $body = (($output | Select-Object -Last 25) -join "`n").Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            # Аннотация-ошибка.
+            Write-Host "::error title=Ошибка компиляции installer.iss::$body"
+            # Останавливаем шаг.
+            throw "ISCC завершился с кодом $code"
+          }
           # Готовый файл.
           $setup = "installer\Output\AutoCompiler-Setup.exe"
           # Он должен существовать.
