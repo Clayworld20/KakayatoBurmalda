@@ -206,6 +206,36 @@ jobs:
           # Сообщаем об успехе аннотацией вверху страницы запуска.
           Write-Host "::notice title=Самопроверка: сборка из исходников::setuptools и wheel установлены; библиотека на hatchling собрана из исходного кода."
 
+      # 6в. Диагностика (только при сбое): сведения о встроенном Python — в аннотации вверху страницы.
+      - name: Диагностика встроенного Python (только при ошибке)
+        # Выполняется только если предыдущие шаги упали.
+        if: failure()
+        # Ошибки диагностики не должны маскировать исходную ошибку.
+        continue-on-error: true
+        # Команды PowerShell.
+        run: |
+          # Встроенный Python.
+          $py = Join-Path $env:LOCALAPPDATA "AutoCompiler\runtime\python.exe"
+          # Функция: длинный текст — аннотацией (переводы строк кодируются как %0A).
+          function Show-Notice([string]$title, [string[]]$lines) {
+            # Экранируем спецсимволы формата команд GitHub.
+            $body = ($lines -join "`n").Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            # Печатаем команду-аннотацию.
+            Write-Host "::warning title=$title::$body"
+          }
+          # Пути поиска модулей и каталоги site-packages.
+          $info = & $py -c "import sys, site, os; print('sys.path =', sys.path); print('getsitepackages =', site.getsitepackages()); print('flags.ignore_environment =', sys.flags.ignore_environment); import sitecustomize; print('sitecustomize =', sitecustomize.__file__); print('pth =', [f for f in os.listdir(sys.prefix) if f.endswith('._pth')])" 2>&1
+          # Публикуем.
+          Show-Notice "Диагностика: пути встроенного Python" $info
+          # Подробная установка проблемного пакета (последние 60 строк).
+          $log = & $py -m pip install -v --no-cache-dir --no-warn-script-location --disable-pip-version-check pymsgbox pygetwindow 2>&1 | Select-Object -Last 60
+          # Публикуем.
+          Show-Notice "Диагностика: pip install (последние 60 строк)" $log
+          # Подробности ошибки из лога самопроверки.
+          $build = Join-Path $env:RUNNER_TEMP "selftest\build.log"
+          # Последние 60 строк лога сборки.
+          if (Test-Path $build) { Show-Notice "Диагностика: конец лога самопроверки" (Get-Content $build -Encoding utf8 | Select-Object -Last 60) }
+
       # 7. Логи самопроверки — для разбора, если что-то пошло не так.
       - name: Сохранение логов самопроверки
         # Выполняется всегда, даже после ошибки.
