@@ -10,3 +10,5 @@ dist/
 *.spec
 # Будущая внутренняя изолированная среда компилятора
 runtime/
+# Готовый установщик, собранный Inno Setup (installer\Output\AutoCompiler-Setup.exe)
+installer/Output/

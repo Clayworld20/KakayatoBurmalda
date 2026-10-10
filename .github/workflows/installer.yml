@@ -1,0 +1,369 @@
+# ============================================================================ #
+#   Сборка и полная проверка установщика AutoCompiler-Setup.exe (Inno Setup 7)  #
+# ============================================================================ #
+#
+# Что происходит при каждом запуске (на чистой виртуальной машине Windows):
+#   1. Контрольные суммы SHA-256 в installer/installer.iss сверяются с настоящими файлами
+#      на python.org — установщик никогда не попадёт к пользователям с неверной суммой.
+#   2. Ставится Inno Setup 7.1.0 (официальный выпуск с GitHub) и собирается AutoCompiler-Setup.exe.
+#   3. Установщик запускается ТИХО, как это сделал бы пользователь, но с /FORCEPYTHON=1:
+#      он обязан сам скачать Python 3.12.10, поставить его, скопировать программу,
+#      установить библиотеки через pip и создать ярлыки pythonw.exe main.py.
+#   4. Установленный Auto-Compiler (через python main.py --selftest) с нуля собирает
+#      тестовую программу tests/selftest/hello_app.py, и она успешно запускается.
+#   5. Программа удаляется встроенным деинсталлятором — проверяем, что всё убрано.
+#   6. AutoCompiler-Setup.exe выкладывается в «Artifacts» (а при публикации релиза — в релиз).
+
+# Название рабочего процесса на вкладке Actions.
+name: Сборка установщика AutoCompiler-Setup.exe
+
+# События, которые запускают сборку.
+on:
+  # Отправка коммитов в любую ветку.
+  push:
+    # Любая ветка.
+    branches: ["**"]
+    # Правки только документации не требуют пересборки.
+    paths-ignore: ["**.md"]
+  # Ручной запуск кнопкой «Run workflow».
+  workflow_dispatch:
+  # Публикация релиза — установщик прикрепляется к нему.
+  release:
+    # Только опубликованные релизы (не черновики).
+    types: [published]
+
+# По умолчанию — только чтение репозитория.
+permissions:
+  # Чтение кода.
+  contents: read
+
+# Новый push в ту же ветку отменяет устаревшую проверку.
+concurrency:
+  # Одна группа на ветку/тег.
+  group: installer-${{ github.ref }}
+  # Отменять предыдущий незавершённый запуск.
+  cancel-in-progress: true
+
+# Задачи.
+jobs:
+  # Единственная задача: сборка и проверка установщика.
+  installer:
+    # Название задачи в интерфейсе GitHub.
+    name: Установщик — сборка, установка, самопроверка, удаление
+    # Виртуальная машина с Windows Server.
+    runs-on: windows-latest
+    # Защита от зависания.
+    timeout-minutes: 45
+    # Запись нужна только для прикрепления файла к релизу.
+    permissions:
+      # Загрузка файлов в релиз.
+      contents: write
+    # Все команды — в PowerShell 7.
+    defaults:
+      # Настройки шагов run.
+      run:
+        # Оболочка PowerShell.
+        shell: pwsh
+    # Переменные окружения для всех шагов.
+    env:
+      # Python читает и пишет файлы в UTF-8 (русские пути и логи).
+      PYTHONUTF8: "1"
+      # Версия Inno Setup, которой собираем установщик.
+      INNO_VERSION: "7.1.0"
+      # Тег выпуска Inno Setup на GitHub (точки заменены подчёркиваниями).
+      INNO_TAG: "is-7_1_0"
+
+    # Шаги.
+    steps:
+      # 1. Код репозитория.
+      - name: Получение кода
+        # Официальное действие GitHub.
+        uses: actions/checkout@v7
+
+      # 2. Суммы SHA-256 в installer.iss должны совпадать с настоящими файлами python.org.
+      - name: Проверка контрольных сумм Python в installer.iss
+        # Команды PowerShell.
+        run: |
+          # Текст сценария установщика.
+          $iss = Get-Content installer\installer.iss -Raw -Encoding utf8
+          # Версия Python из строки #define PythonVersion "3.12.10".
+          $version = [regex]::Match($iss, '#define PythonVersion "([^"]+)"').Groups[1].Value
+          # Без версии проверять нечего — это ошибка в сценарии.
+          if (-not $version) { throw "В installer.iss не найдена строка #define PythonVersion" }
+          # Соответствие: имя определения → имя файла на python.org.
+          $files = [ordered]@{
+            "PythonSha256Amd64" = "python-$version-amd64.exe"
+            "PythonSha256Arm64" = "python-$version-arm64.exe"
+            "PythonSha256Win32" = "python-$version.exe"
+          }
+          # Проверяем каждый файл.
+          foreach ($name in $files.Keys) {
+            # Ожидаемая сумма из сценария.
+            $expected = [regex]::Match($iss, "#define $name `"([0-9a-f]{64})`"").Groups[1].Value
+            # Нет суммы — ошибка в сценарии.
+            if (-not $expected) { throw "В installer.iss не найдена сумма $name" }
+            # Куда скачать файл.
+            $target = Join-Path $env:RUNNER_TEMP $files[$name]
+            # Скачиваем официальный установщик.
+            Invoke-WebRequest "https://www.python.org/ftp/python/$version/$($files[$name])" -OutFile $target
+            # Настоящая сумма скачанного файла.
+            $actual = (Get-FileHash $target -Algorithm SHA256).Hash.ToLower()
+            # Сравниваем.
+            if ($actual -ne $expected) { throw "Неверная сумма $name ($($files[$name])): в installer.iss $expected, на самом деле $actual" }
+            # Сообщаем об успехе.
+            Write-Host "OK $($files[$name]) $actual"
+          }
+
+      # 3. Компилятор Inno Setup 7 (ставим в отдельную папку, без влияния на систему).
+      - name: Установка Inno Setup ${{ env.INNO_VERSION }}
+        # Команды PowerShell.
+        run: |
+          # Официальный установщик Inno Setup из выпусков на GitHub.
+          $url = "https://github.com/jrsoftware/issrc/releases/download/$env:INNO_TAG/innosetup-$env:INNO_VERSION-x64.exe"
+          # Куда скачать.
+          $setup = Join-Path $env:RUNNER_TEMP "innosetup.exe"
+          # Скачиваем.
+          Invoke-WebRequest $url -OutFile $setup
+          # Папка установки компилятора.
+          $dir = Join-Path $env:RUNNER_TEMP "InnoSetup7"
+          # Тихая установка «только для меня» в нашу папку.
+          $p = Start-Process $setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-", "/CURRENTUSER", "/DIR=`"$dir`"" -Wait -PassThru
+          # Ненулевой код — ошибка.
+          if ($p.ExitCode -ne 0) { throw "Inno Setup не установился (код $($p.ExitCode))" }
+          # Путь к консольному компилятору.
+          $iscc = Join-Path $dir "ISCC.exe"
+          # Компилятор должен существовать.
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe не найден в $dir" }
+          # Версия компилятора — в лог.
+          & $iscc --version
+          # Передаём путь следующим шагам.
+          "ISCC=$iscc" >> $env:GITHUB_ENV
+
+      # 4. Сборка установщика.
+      - name: Сборка AutoCompiler-Setup.exe
+        # Команды PowerShell.
+        run: |
+          # Компилируем (версия программы читается из autocompiler\__init__.py самим сценарием).
+          & $env:ISCC installer\installer.iss
+          # Ненулевой код — ошибка компиляции (текст ошибки — выше в логе).
+          if ($LASTEXITCODE -ne 0) { throw "ISCC завершился с кодом $LASTEXITCODE" }
+          # Готовый файл.
+          $setup = "installer\Output\AutoCompiler-Setup.exe"
+          # Он должен существовать.
+          if (-not (Test-Path $setup)) { throw "Не найден $setup" }
+          # Контрольная сумма.
+          $hash = (Get-FileHash $setup -Algorithm SHA256).Hash.ToLower()
+          # Файл с суммой рядом с установщиком (формат sha256sum).
+          "$hash  AutoCompiler-Setup.exe" | Out-File "$setup.sha256" -Encoding ascii
+          # Размер в мегабайтах.
+          $size = [math]::Round((Get-Item $setup).Length / 1MB, 2)
+          # Для сводки.
+          "SETUP_SHA256=$hash" >> $env:GITHUB_ENV
+          # Для сводки.
+          "SETUP_SIZE=$size" >> $env:GITHUB_ENV
+          # Аннотация вверху страницы запуска.
+          Write-Host "::notice title=Установщик собран::AutoCompiler-Setup.exe, $size МБ, SHA-256 $hash"
+
+      # 5. Тихая установка с обязательной загрузкой и установкой Python.
+      - name: Тихая установка (Python скачивается и ставится установщиком)
+        # Скачивание Python и библиотек — несколько минут.
+        timeout-minutes: 15
+        # Команды PowerShell.
+        run: |
+          # Журнал установки.
+          $log = Join-Path $env:RUNNER_TEMP "setup.log"
+          # Параметры: тихо, только для меня, принудительно ставить Python, со значком на рабочем столе.
+          $arguments = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/FORCEPYTHON=1", "/TASKS=desktopicon", "/LOG=`"$log`"")
+          # Запускаем установщик и ждём окончания.
+          $p = Start-Process "installer\Output\AutoCompiler-Setup.exe" -ArgumentList $arguments -Wait -PassThru
+          # Функция: аннотация вверху страницы запуска (переводы строк кодируются как %0A).
+          function Show-Notice([string]$title, [string[]]$lines) {
+            # Экранируем спецсимволы формата команд GitHub.
+            $body = ($lines -join "`n").Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            # Печатаем команду-аннотацию.
+            Write-Host "::notice title=$title::$body"
+          }
+          # Журнал целиком — в вывод шага.
+          if (Test-Path $log) { Get-Content $log -Encoding utf8 }
+          # Главные строки журнала (Python, pip, ошибки) — в аннотацию.
+          if (Test-Path $log) {
+            # Отбираем важные строки.
+            $key = Get-Content $log -Encoding utf8 | Where-Object { $_ -match 'Python|pip:|Ошибка|ошибк|Exit code|Installation process succeeded|Fatal|Aborted|Скачиван|Загрузка|Проверка' } | Select-Object -Last 60
+            # Публикуем.
+            Show-Notice "Установка: ключевые строки журнала" $key
+          }
+          # Ненулевой код — установка провалена.
+          if ($p.ExitCode -ne 0) { throw "Установщик завершился с кодом $($p.ExitCode)" }
+          # Папка программы по умолчанию для установки «только для меня».
+          $app = Join-Path $env:LOCALAPPDATA "Programs\Auto-Compiler"
+          # Файлы программы должны быть на месте.
+          foreach ($f in @("main.py", "requirements.txt", "autocompiler.ico", "autocompiler\__init__.py", "autocompiler\gui\main_window.py", "unins000.exe")) {
+            # Проверяем каждый.
+            if (-not (Test-Path (Join-Path $app $f))) { throw "Не установлен файл $f" }
+          }
+          # Кэш байткода не должен попадать в установщик.
+          if (Get-ChildItem $app -Recurse -Filter "*.pyc" -ErrorAction SilentlyContinue) { throw "В установку попали файлы .pyc" }
+          # Свежеустановленный Python 3.12 «только для меня» — в реестре HKCU.
+          $key = Get-ItemProperty "HKCU:\Software\Python\PythonCore\3.12\InstallPath" -ErrorAction Stop
+          # Путь к python.exe.
+          $python = $key.ExecutablePath
+          # Путь к pythonw.exe.
+          $pythonw = $key.WindowedExecutablePath
+          # Оба файла должны существовать.
+          if (-not (Test-Path $python) -or -not (Test-Path $pythonw)) { throw "Python из реестра не найден: $python / $pythonw" }
+          # Библиотеки интерфейса установлены, tkinter работает.
+          $versions = & $python -c "import sys, tkinter, customtkinter; tkinter.Tcl(); print(sys.version.split()[0], customtkinter.__version__)"
+          # Код ошибки — библиотеки не установлены.
+          if ($LASTEXITCODE -ne 0) { throw "customtkinter или tkinter не работают в установленном Python" }
+          # Ярлык на рабочем столе.
+          $desktop = Join-Path ([Environment]::GetFolderPath("Desktop")) "Auto-Compiler.lnk"
+          # Ярлык в меню «Пуск».
+          $startMenu = Join-Path ([Environment]::GetFolderPath("Programs")) "Auto-Compiler.lnk"
+          # Объект Windows для чтения ярлыков.
+          $shell = New-Object -ComObject WScript.Shell
+          # Проверяем оба ярлыка.
+          foreach ($lnk in @($desktop, $startMenu)) {
+            # Ярлык существует.
+            if (-not (Test-Path $lnk)) { throw "Нет ярлыка $lnk" }
+            # Читаем ярлык.
+            $s = $shell.CreateShortcut($lnk)
+            # Должен запускать именно pythonw.exe свежеустановленного Python.
+            if ($s.TargetPath -ne $pythonw) { throw "Ярлык $lnk запускает $($s.TargetPath), а не $pythonw" }
+            # С параметром main.py из папки программы.
+            if ($s.Arguments -ne "`"$app\main.py`"") { throw "Неверные параметры ярлыка: $($s.Arguments)" }
+          }
+          # Передаём пути следующим шагам.
+          "APP_DIR=$app" >> $env:GITHUB_ENV
+          # Путь к Python.
+          "APP_PYTHON=$python" >> $env:GITHUB_ENV
+          # Итог — аннотацией.
+          Show-Notice "Установка прошла успешно" @("Папка: $app", "Python и customtkinter: $versions", "Ярлык: $pythonw `"$app\main.py`"")
+
+      # 6. Установленная программа собирает и запускает тестовую программу.
+      - name: Самопроверка установленного Auto-Compiler
+        # Скачивание среды сборки и библиотек — несколько минут.
+        timeout-minutes: 30
+        # Команды PowerShell.
+        run: |
+          # Папка самопроверки.
+          $dir = Join-Path $env:RUNNER_TEMP "selftest"
+          # Копируем тестовый проект.
+          Copy-Item tests\selftest $dir -Recurse -Force
+          # Аргументы режима --selftest (пути в кавычках).
+          $arguments = @("`"$env:APP_DIR\main.py`"", "--selftest", "`"$dir\hello_app.py`"", "--icon", "`"$dir\app.ico`"", "--log", "`"$dir\build.log`"", "--result-file", "`"$dir\result.txt`"")
+          # Запускаем установленную программу установленным Python.
+          $p = Start-Process $env:APP_PYTHON -ArgumentList $arguments -WorkingDirectory $env:APP_DIR -Wait -PassThru -NoNewWindow
+          # Лог сборки — в вывод шага.
+          if (Test-Path "$dir\build.log") { Get-Content "$dir\build.log" -Encoding utf8 }
+          # Главные строки лога — в аннотацию.
+          if (Test-Path "$dir\build.log") {
+            # Отбираем шаги, успехи, предупреждения и ошибки.
+            $key = Get-Content "$dir\build.log" -Encoding utf8 | Where-Object { $_ -match '\] (STEP|SUCCESS|WARNING|ERROR) ' -or $_ -match '^RESULT=' }
+            # Экранируем и публикуем.
+            $body = ($key -join "`n").Replace("%", "%25").Replace("`r", "%0D").Replace("`n", "%0A")
+            # Аннотация.
+            Write-Host "::notice title=Самопроверка установленной программы::$body"
+          }
+          # Ненулевой код — самопроверка провалена.
+          if ($p.ExitCode -ne 0) { throw "Установленный Auto-Compiler не смог собрать тестовую программу (код $($p.ExitCode))" }
+          # Путь к собранной программе.
+          $built = (Get-Content "$dir\result.txt" -Encoding utf8 -Raw).Trim()
+          # Файл отчёта.
+          $report = "$dir\report.txt"
+          # Запускаем собранную программу.
+          $app = Start-Process $built -ArgumentList "`"$report`"" -Wait -PassThru
+          # Должна завершиться успешно и записать отчёт.
+          if ($app.ExitCode -ne 0 -or -not (Test-Path $report)) { throw "Собранная тестовая программа не запустилась (код $($app.ExitCode))" }
+          # Текст отчёта.
+          $text = Get-Content $report -Encoding utf8 -Raw
+          # В лог.
+          Write-Host $text
+          # Отчёт должен начинаться с OK.
+          if (-not $text.StartsWith("OK")) { throw "Тестовая программа сообщила об ошибке" }
+
+      # 7. Удаление программы встроенным деинсталлятором.
+      - name: Удаление программы
+        # Команды PowerShell.
+        run: |
+          # Деинсталлятор в папке программы.
+          $uninstaller = Join-Path $env:APP_DIR "unins000.exe"
+          # Тихое удаление.
+          Start-Process $uninstaller -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+          # Деинсталлятор перезапускает себя из временной папки — ждём, пока файлы исчезнут (до 2 минут).
+          $deadline = (Get-Date).AddMinutes(2)
+          # Ждём исчезновения main.py.
+          while ((Test-Path "$env:APP_DIR\main.py") -and ((Get-Date) -lt $deadline)) { Start-Sleep -Seconds 2 }
+          # Немного подождём завершения уборки.
+          Start-Sleep -Seconds 5
+          # Что должно исчезнуть: код, среда сборки и ярлыки.
+          $mustBeGone = @("$env:APP_DIR\main.py", "$env:APP_DIR\autocompiler", "$env:APP_DIR\runtime", (Join-Path ([Environment]::GetFolderPath("Desktop")) "Auto-Compiler.lnk"), (Join-Path ([Environment]::GetFolderPath("Programs")) "Auto-Compiler.lnk"))
+          # Проверяем каждый путь.
+          foreach ($path in $mustBeGone) { if (Test-Path $path) { throw "После удаления осталось: $path" } }
+          # Python остаётся (это ожидаемо — им могут пользоваться другие программы).
+          Write-Host "::notice title=Удаление::Программа, её среда сборки и ярлыки удалены; Python остался на компьютере, как и задумано."
+
+      # 8. Журналы — всегда (в том числе при ошибке), чтобы было что изучить.
+      - name: Сохранение журналов
+        # Даже если предыдущие шаги упали.
+        if: always()
+        # Официальное действие загрузки артефактов.
+        uses: actions/upload-artifact@v7
+        # Параметры.
+        with:
+          # Имя архива.
+          name: installer-logs
+          # Журнал установки и лог самопроверки.
+          path: |
+            ${{ runner.temp }}/setup.log
+            ${{ runner.temp }}/selftest/build.log
+          # Нет файлов — не ошибка.
+          if-no-files-found: ignore
+          # Хранить 14 дней.
+          retention-days: 14
+
+      # 9. Готовый установщик — в Artifacts.
+      - name: Публикация AutoCompiler-Setup.exe в Artifacts
+        # Официальное действие загрузки артефактов.
+        uses: actions/upload-artifact@v7
+        # Параметры.
+        with:
+          # Имя архива.
+          name: AutoCompiler-Setup
+          # Установщик и его контрольная сумма.
+          path: |
+            installer/Output/AutoCompiler-Setup.exe
+            installer/Output/AutoCompiler-Setup.exe.sha256
+          # Без файла — ошибка.
+          if-no-files-found: error
+          # Хранить 30 дней.
+          retention-days: 30
+
+      # 10. При публикации релиза — прикрепляем установщик к нему.
+      - name: Прикрепление к релизу
+        # Только для события «релиз опубликован».
+        if: github.event_name == 'release'
+        # Переменные для GitHub CLI.
+        env:
+          # Токен этого запуска.
+          GH_TOKEN: ${{ github.token }}
+          # Тег релиза (через переменную — безопасно от подстановки кода).
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        # Загружаем (--clobber заменяет старые файлы при повторном запуске).
+        run: gh release upload "$env:RELEASE_TAG" "installer\Output\AutoCompiler-Setup.exe" "installer\Output\AutoCompiler-Setup.exe.sha256" --clobber --repo "$env:GITHUB_REPOSITORY"
+
+      # 11. Итоговая сводка.
+      - name: Итоговая сводка
+        # Команды PowerShell.
+        run: |
+          # Строки сводки в Markdown.
+          $lines = @(
+            "## ✅ AutoCompiler-Setup.exe готов и проверен",
+            "",
+            "* Размер: **$env:SETUP_SIZE МБ**",
+            "* SHA-256: ``$env:SETUP_SHA256``",
+            "* Проверено: тихая установка со скачиванием Python 3.12.10, библиотеки, ярлыки pythonw.exe, сборка тестовой программы, удаление.",
+            "",
+            "Скачать: блок **Artifacts** внизу этой страницы → **AutoCompiler-Setup**."
+          )
+          # Записываем сводку.
+          $lines -join "`n" >> $env:GITHUB_STEP_SUMMARY

@@ -1,0 +1,7 @@
+# Файлы установщика Inno Setup: в рабочей копии — с переводами строк Windows (CRLF),
+# как привыкли Inno Setup и Блокнот. Кодировка — UTF-8 с BOM (BOM хранится в самом файле).
+installer/*.iss text eol=crlf
+installer/*.txt text eol=crlf
+# Картинки и значки — двоичные файлы, их нельзя менять при переводе строк.
+*.ico binary
+*.png binary
