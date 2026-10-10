@@ -9,7 +9,36 @@
 нехватке прав скрипт печатает понятное сообщение, что именно нужно выдать.
 
 ```
-wireless-adb-nowifi.sh [опции]
+wireless-adb-nowifi.sh [опции]          # Linux / macOS / Termux
+wireless-adb-nowifi.cmd [опции]         # Windows (нужен Git Bash или WSL)
+```
+
+---
+
+## 0. Копипаст за 30 секунд
+
+**Хочу готовые команды без скрипта** → [`docs/SNIPPETS.md`](docs/SNIPPETS.md)
+(7 блоков: USB-кабель, root-порт, root-TLS, race без root, Termux, проверка прав, откат).
+
+**Есть USB-кабель** (больше ничего не нужно):
+
+```bash
+adb tcpip 5555 && adb shell ip -f inet addr show | grep 'inet ' && adb connect <IP>:5555
+```
+
+**Есть root, нужен обход проверки Wi-Fi целиком:**
+
+```bash
+adb shell su -c 'setprop persist.adb.tls_server.enable 1; settings put global adb_wifi_enabled 1; settings put global adb_allowed_connection_time 0'
+adb shell logcat -d | grep -Ei 'adb ?wifi (started|running) on port'   # → PORT
+adb connect <IP>:<PORT>
+```
+
+**Без root, но есть WRITE_SECURE_SETTINGS** (включите точку доступа и спамьте флаг):
+
+```bash
+for i in $(seq 1 300); do adb shell settings put global adb_wifi_enabled 1; done
+adb shell getprop persist.adb.tls_server.enable      # → 1, значит демон закрепился
 ```
 
 ---
@@ -135,7 +164,15 @@ chmod +x wireless-adb-nowifi.sh
 
 ### Windows
 
-Запускайте в **Git Bash** / **WSL** (чистый `cmd.exe` не нужен):
+Готовый враппер сам найдёт bash (Git for Windows / WSL):
+
+```bat
+wireless-adb-nowifi.cmd --status
+wireless-adb-nowifi.cmd --strategy usb-tcpip
+wireless-adb-nowifi.cmd --adb "%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe" --strategy tls-force
+```
+
+Либо вручную в **Git Bash** / **WSL**:
 
 ```bash
 ./wireless-adb-nowifi.sh --adb "$LOCALAPPDATA/Android/Sdk/platform-tools/adb.exe"
@@ -259,6 +296,8 @@ Google анонсировала переработку «ADB Wi-Fi 2.0» в Andr
 
 ```
 wireless-adb-nowifi.sh     # сам скрипт (bash, без зависимостей, кроме adb)
+wireless-adb-nowifi.cmd    # обёртка для Windows (ищет Git Bash / WSL)
+docs/SNIPPETS.md           # минимальные копипаст-рецепты без скрипта
 docs/HOW-IT-WORKS.md       # как именно устроена проверка Wi-Fi в AOSP
 tests/mock/adb             # фейковый adb + логика устройства (без реального девайса)
 tests/mock-device/         # фейковые settings/getprop/setprop/ip/su — запуск «из Termux»
