@@ -1,0 +1,14 @@
+# Кэш байткода Python
+__pycache__/
+*.py[cod]
+# Виртуальные окружения
+.venv/
+venv/
+# Артефакты PyInstaller (появятся на следующих этапах)
+build/
+dist/
+*.spec
+# Будущая внутренняя изолированная среда компилятора
+runtime/
+# Готовый установщик, собранный Inno Setup (installer\Output\AutoCompiler-Setup.exe)
+installer/Output/
