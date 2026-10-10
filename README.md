@@ -31,6 +31,11 @@
 2. **Подготовка встроенного Python** — при первом запуске в папку `runtime/` скачивается
    официальный Windows embeddable Python 3.12 (`python-3.12.x-embed-*.zip`, проверка SHA-256),
    в `python312._pth` раскомментируется `import site`, затем скачивается и запускается `get-pip.py`.
+   Сразу после pip один раз ставятся сборочные утилиты `setuptools` и `wheel` (get-pip.py для
+   Python 3.12+ их не ставит), а в корень runtime кладётся мост `sitecustomize.py`: embeddable-Python
+   игнорирует `PYTHONPATH`, через который pip подключает свой изолированный сборщик, поэтому без моста
+   библиотеки, выложенные только исходным кодом (например, PyAutoGUI), падали с ошибкой
+   `BackendUnavailable: Cannot import 'setuptools.build_meta'`.
    В embeddable-версии нет tkinter — если программа пользователя рисует окна (tkinter/customtkinter),
    tkinter автоматически докачивается из официального полного архива python.org.
 3. **Загрузка библиотек** — имена импортов переводятся в имена pip-пакетов по встроенной карте

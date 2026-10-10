@@ -152,6 +152,16 @@ _SSL_MARKERS = ("certificate verify failed", "sslerror", "ssl: ", "certificate_v
 # Фразы, означающие «такой библиотеки нет в каталоге PyPI».
 _NOT_FOUND_MARKERS = ("no matching distribution found", "could not find a version that satisfies")
 
+# Фразы, означающие «pip не нашёл сборщик пакетов» (setuptools, hatchling…) при сборке из исходного кода.
+_BUILD_BACKEND_MARKERS = (
+    # Ошибка pip: сборщик пакетов недоступен.
+    "backendunavailable",
+    # Самый частый случай — нет setuptools.
+    "cannot import 'setuptools.build_meta'",
+    # Старые версии pip/setuptools.
+    "no module named 'setuptools'",
+)
+
 # Фразы, означающие «библиотеку нужно компилировать из исходников, а компилятора нет».
 _NEEDS_COMPILER_MARKERS = (
     # Классическое сообщение об отсутствии Visual C++.
@@ -250,6 +260,18 @@ def describe_process_failure(exc: ProcessFailedError) -> CompilerError:
             hint=(
                 "Если это ваш собственный модуль — положите его .py-файл в ту же папку, что и главный файл. "
                 "Если это опечатка в import — исправьте её в коде."
+            ),
+            details=details,
+        )
+
+    # 4а. Нет сборщика пакетов (проверяем раньше «нужен компилятор» — там похожие слова).
+    if _contains_any(text, _BUILD_BACKEND_MARKERS):
+        return CompilerError(
+            title="Не хватает сборочных утилит",
+            message=f"Библиотека{package} выложена только в виде исходного кода, и pip не нашёл утилиты для её сборки (setuptools/wheel).",
+            hint=(
+                "Нажмите «Собрать .exe» ещё раз — компилятор сам доустановит сборочные утилиты. "
+                "Если ошибка повторится, удалите папку %LOCALAPPDATA%\\AutoCompiler\\runtime — она будет создана заново."
             ),
             details=details,
         )

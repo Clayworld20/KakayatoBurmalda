@@ -8,7 +8,8 @@
 #   3. Компилятор упаковывается в один файл dist/Auto-Compiler.exe.
 #   4. САМОПРОВЕРКА: готовый Auto-Compiler.exe с нуля (скачивая встроенный Python с python.org)
 #      собирает тестовую программу tests/selftest/hello_app.py, после чего собранная программа
-#      запускается и подтверждает, что внутри есть customtkinter, Pillow, Tcl/Tk и файлы ресурсов.
+#      запускается и подтверждает, что внутри есть customtkinter, Pillow, PyAutoGUI, Tcl/Tk и файлы ресурсов.
+#      Затем во встроенном Python проверяется сборка библиотек из исходного кода (setuptools и hatchling).
 #   5. Если всё хорошо — Auto-Compiler.exe выкладывается для скачивания:
 #        * всегда — в «Artifacts» этого запуска (вкладка Actions, хранится 30 дней);
 #        * при публикации релиза — прикрепляется к нему (вкладка Releases, хранится всегда).
@@ -187,6 +188,23 @@ jobs:
           Show-Notice "Самопроверка: отчёт собранной тестовой программы" @($text.Trim())
           # Отчёт должен начинаться с OK.
           if (-not $text.StartsWith("OK")) { throw "Тестовая программа сообщила об ошибке" }
+
+      # 6б. Встроенный Python умеет собирать библиотеки из исходного кода любым сборщиком.
+      - name: Самопроверка — сборка библиотек из исходного кода во встроенном Python
+        # Команды PowerShell.
+        run: |
+          # Встроенный Python, который создал Auto-Compiler.exe на предыдущем шаге.
+          $py = Join-Path $env:LOCALAPPDATA "AutoCompiler\runtime\python.exe"
+          # Сборочные утилиты должны быть установлены и отмечены в маркере.
+          & $py -c "import setuptools.build_meta, wheel, json, pathlib, sys; m = json.loads((pathlib.Path(sys.executable).parent / '.autocompiler-runtime.json').read_text(encoding='utf-8')); assert m.get('build_tools') is True, m; print('setuptools/wheel:', 'OK')"
+          # Ошибка проверки — прерываем сборку.
+          if ($LASTEXITCODE -ne 0) { throw "Сборочные утилиты setuptools/wheel не установлены во встроенный Python" }
+          # iniconfig принудительно собираем из исходников: его сборщик — hatchling (проверка моста sitecustomize.py).
+          & $py -m pip install --no-cache-dir --no-binary iniconfig --no-deps --force-reinstall --no-warn-script-location --disable-pip-version-check iniconfig
+          # Ошибка установки — прерываем сборку.
+          if ($LASTEXITCODE -ne 0) { throw "Встроенный Python не смог собрать библиотеку на hatchling из исходного кода" }
+          # Сообщаем об успехе аннотацией вверху страницы запуска.
+          Write-Host "::notice title=Самопроверка: сборка из исходников::setuptools и wheel установлены; библиотека на hatchling собрана из исходного кода."
 
       # 7. Логи самопроверки — для разбора, если что-то пошло не так.
       - name: Сохранение логов самопроверки

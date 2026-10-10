@@ -4,6 +4,7 @@
 Её собирает уже готовый Auto-Compiler.exe, затем собранный файл запускается и проверяет, что внутри есть всё нужное:
     * customtkinter со своими темами (проверка флага --collect-data customtkinter);
     * Pillow, импортируемый как PIL (проверка карты «импорт → pip-пакет»);
+    * PyAutoGUI — его зависимости выложены только исходным кодом (проверка сборочных утилит setuptools/wheel);
     * графический движок Tcl/Tk (проверка автодокачки tkinter во встроенный Python);
     * файл из папки assets по относительному пути (проверка --add-data и runtime-хука).
 Результат записывается в файл, путь к которому передан первым аргументом.
@@ -18,6 +19,8 @@ from pathlib import Path
 
 # customtkinter при импорте читает файлы тем — без --collect-data импорт упадёт.
 import customtkinter
+# PyAutoGUI: pip собирает его и часть зависимостей из исходного кода (нужны setuptools и wheel).
+import pyautogui
 # Pillow: имя импорта PIL отличается от имени пакета pillow.
 from PIL import Image
 
@@ -32,9 +35,12 @@ def main() -> int:
     tcl_version = tkinter.Tcl().eval("info patchlevel")
     # Маленькая картинка — Pillow действительно работает, а не просто импортировался.
     size = Image.new("RGB", (4, 2), "navy").size
+    # Размер экрана через PyAutoGUI — библиотека работает внутри .exe.
+    width, height = pyautogui.size()
     # Записываем отчёт.
     report.write_text(
-        f"OK | {greeting} | customtkinter {customtkinter.__version__} | Tcl {tcl_version} | Pillow {size}",
+        f"OK | {greeting} | customtkinter {customtkinter.__version__} | Tcl {tcl_version} | Pillow {size}"
+        f" | PyAutoGUI {pyautogui.__version__} (экран {width}x{height})",
         encoding="utf-8",
     )
     # Успех.

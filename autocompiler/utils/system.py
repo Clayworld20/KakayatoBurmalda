@@ -910,6 +910,62 @@ def patch_pth_file(pth_file: Path, extra_paths: Iterable[str] = ("Lib",)) -> boo
     return True
 
 
+# Содержимое файла runtime/sitecustomize.py — «мост» для изолированной сборки библиотек pip.
+#
+# Зачем он нужен: многие библиотеки (например, PyAutoGUI и его зависимости) выложены только
+# в виде исходного кода, и pip собирает их сам. Для этого pip скачивает сборщик (setuptools,
+# hatchling, flit…) во временную папку и подключает её через переменную PYTHONPATH и свой
+# файл sitecustomize.py. Но портативный Python из-за файла pythonXY._pth ИГНОРИРУЕТ PYTHONPATH,
+# поэтому сборщик «не виден» и pip падает с ошибкой «BackendUnavailable: Cannot import
+# 'setuptools.build_meta'». Этот мост находит sitecustomize.py, который pip положил в папку
+# из PYTHONPATH, и выполняет его — изоляция pip начинает работать как в обычном Python.
+# Во всех остальных случаях (PYTHONPATH пуст или в нём нет sitecustomize.py) мост ничего не делает.
+SITECUSTOMIZE_BRIDGE_CODE = '''\
+# Создано Auto-Compiler. Мост для изолированной сборки библиотек pip во встроенном Python.
+# Встроенный Python игнорирует PYTHONPATH (из-за файла ._pth), а pip через него подключает
+# временную папку со сборщиком пакетов. Этот файл выполняет подготовленный pip sitecustomize.py.
+
+# os — переменные окружения и пути, sys — список путей поиска модулей.
+import os
+import sys
+
+
+def _autocompiler_pip_bridge():
+    """Найти sitecustomize.py от pip в папках из PYTHONPATH и выполнить его."""
+    # Путь к этому файлу (чтобы не выполнить самого себя).
+    here = os.path.normcase(os.path.abspath(__file__))
+    # Перебираем папки из PYTHONPATH.
+    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
+        # Пустые элементы пропускаем.
+        if not entry:
+            continue
+        # Файл, который pip кладёт в свою временную папку.
+        candidate = os.path.join(entry, "sitecustomize.py")
+        # Нет файла или это мы сами — дальше.
+        if not os.path.isfile(candidate) or os.path.normcase(os.path.abspath(candidate)) == here:
+            continue
+        # Делаем папку видимой для импорта (как это сделал бы обычный Python).
+        if entry not in sys.path:
+            sys.path.insert(0, entry)
+        # Читаем код pip.
+        with open(candidate, encoding="utf-8") as handle:
+            code = handle.read()
+        # Выполняем его: pip сам уберёт системные пакеты и подключит папку со сборщиком.
+        exec(compile(code, candidate, "exec"), {"__name__": "__pip_build_env__", "__file__": candidate})
+        # Одного файла достаточно.
+        return
+
+
+# Мост никогда не должен мешать запуску Python.
+try:
+    # Запускаем поиск.
+    _autocompiler_pip_bridge()
+# Любая ошибка — просто работаем без моста.
+except Exception:
+    pass
+'''
+
+
 class PythonRuntime:
     """Портативный Python в папке runtime/ — «внутренняя изолированная среда» компилятора."""
 
@@ -918,6 +974,9 @@ class PythonRuntime:
     PYTHON_VERSION = "3.12.10"
     # Имя файла-маркера: появляется только после ПОЛНОСТЬЮ успешной настройки.
     MARKER_NAME = ".autocompiler-runtime.json"
+    # Базовые сборочные утилиты: без них pip не может собрать библиотеки, выложенные только
+    # исходным кодом (get-pip.py для Python 3.12+ их больше не ставит).
+    BUILD_TOOLS: tuple[str, ...] = ("setuptools", "wheel")
     # Адрес официального установщика pip.
     GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
     # Базовый адрес загрузок python.org.
@@ -1136,7 +1195,7 @@ class PythonRuntime:
 
     def pip_install(
         self,
-        requirement: str,
+        requirement: str | Sequence[str],
         *,
         bus: EventBus,
         cancel: Optional[CancelToken] = None,
@@ -1145,8 +1204,10 @@ class PythonRuntime:
         timeout: float = 1800,
     ) -> None:
         """Скрыто установить библиотеку во встроенный Python с живым статусом в окне."""
+        # Одна библиотека или сразу несколько — приводим к списку.
+        requirements = [requirement] if isinstance(requirement, str) else list(requirement)
         # Понятное имя для статуса.
-        name = display_name or requirement
+        name = display_name or ", ".join(requirements)
         # Статус сразу — пользователь видит, что работа началась.
         bus.status(f"Скачиваю необходимые компоненты для компиляции: {name}…")
         # Базовая команда pip.
@@ -1162,8 +1223,8 @@ class PythonRuntime:
         # Если pip умеет — включаем машиночитаемый прогресс скачивания.
         if self.pip_supports_raw_progress(cancel):
             args += ["--progress-bar", "raw"]
-        # Имя устанавливаемого пакета.
-        args.append(requirement)
+        # Имена устанавливаемых пакетов.
+        args.extend(requirements)
         # Запускаем pip с переводчиком вывода.
         self.run_python(
             args,
@@ -1201,6 +1262,8 @@ class PythonRuntime:
         if self.is_ready():
             # Зелёная строка.
             bus.success(f"Встроенный Python {self.PYTHON_VERSION} уже установлен: {self.root}")
+            # Среда, созданная старой версией компилятора, могла остаться без сборочных утилит — доустанавливаем.
+            self.ensure_build_tools(bus, cancel, progress)
             # Прогресс этапа — 100%.
             progress(1.0)
             # Готово.
@@ -1283,14 +1346,14 @@ class PythonRuntime:
             cancel=cancel,
         )
 
-        # --- 5. Установка pip (50% → 95%) ---
+        # --- 5. Установка pip (50% → 85%) ---
         bus.status("Устанавливаю pip во встроенный Python…")
         # Запускаем get-pip.py (он сам скачает свежий pip).
         self.run_python(
             [str(get_pip), "--no-warn-script-location", "--progress-bar", "raw"],
             description="Установка pip",
             kind="get-pip",
-            on_line=PipOutputTranslator(bus, "pip", lambda f: progress(0.50 + 0.45 * f)),
+            on_line=PipOutputTranslator(bus, "pip", lambda f: progress(0.50 + 0.35 * f)),
             cancel=cancel,
             timeout=900,
         )
@@ -1301,18 +1364,79 @@ class PythonRuntime:
         # Сообщаем об успехе.
         bus.success("pip установлен и работает.")
 
-        # --- 6. Маркер готовности (пишется ПОСЛЕДНИМ) ---
+        # --- 6. Маркер готовности Python + pip ---
+        # Пишется ДО сборочных утилит: если их установка сорвётся (например, пропал интернет),
+        # в следующий раз не придётся заново скачивать Python — доустановятся только утилиты.
         self.write_marker(
             python_version=self.PYTHON_VERSION,
             arch=arch,
             pip=True,
+            build_tools=False,
             tkinter=False,
             created=datetime.now().isoformat(timespec="seconds"),
         )
+        # Прогресс.
+        progress(0.85)
+
+        # --- 7. Сборочные утилиты setuptools и wheel (85% → 100%) ---
+        self.ensure_build_tools(bus, cancel, lambda f: progress(0.85 + 0.15 * f))
         # Прогресс этапа — 100%.
         progress(1.0)
         # Итоговое сообщение.
         bus.success(f"Встроенный Python готов: {self.root}")
+
+    def write_sitecustomize_bridge(self) -> None:
+        """Положить в корень runtime мост sitecustomize.py (если его нет или он устарел)."""
+        # Путь к файлу моста: корень runtime есть в pythonXY._pth (строка «.»).
+        target = self.root / "sitecustomize.py"
+        # Файл уже на месте и совпадает — ничего не делаем.
+        if target.is_file() and target.read_text(encoding="utf-8", errors="replace") == SITECUSTOMIZE_BRIDGE_CODE:
+            return
+        # Записываем (перезаписываем) файл моста.
+        target.write_text(SITECUSTOMIZE_BRIDGE_CODE, encoding="utf-8")
+
+    def ensure_build_tools(self, bus: EventBus, cancel: CancelToken, progress: Optional[ProgressHandler] = None) -> None:
+        """
+        Один раз установить во встроенный Python сборочные утилиты setuptools и wheel
+        и мост sitecustomize.py — без них pip не может собрать библиотеки из исходного кода
+        (ошибка «BackendUnavailable: Cannot import 'setuptools.build_meta'», например у PyAutoGUI).
+        """
+        # Внешний Python (режим разработчика) не трогаем — это чужая установка.
+        if self.external:
+            return
+        # Мост пишем всегда (это мгновенно): он мог устареть после обновления компилятора.
+        self.write_sitecustomize_bridge()
+        # Утилиты уже установлены раньше — повторно не ставим.
+        if self.read_marker().get("build_tools"):
+            return
+        # Обработчик прогресса (может отсутствовать).
+        report = progress or (lambda _fraction: None)
+        # Объясняем пользователю, что происходит.
+        bus.info("Устанавливаю сборочные утилиты setuptools и wheel (нужны для библиотек, которые pip собирает сам)…")
+        # Тихая установка: скрытое окно, --no-warn-script-location, понятный статус в окне.
+        self.pip_install(
+            list(self.BUILD_TOOLS),
+            bus=bus,
+            cancel=cancel,
+            display_name="setuptools, wheel",
+            on_fraction=lambda f: report(0.9 * f),
+            timeout=900,
+        )
+        # Проверяем, что сборщик действительно импортируется.
+        self.run_python(
+            ["-c", "import setuptools.build_meta, wheel"],
+            description="Проверка сборочных утилит setuptools и wheel",
+            kind="pip",
+            package="setuptools",
+            cancel=cancel,
+            timeout=120,
+        )
+        # Запоминаем, что утилиты на месте (больше устанавливать не нужно).
+        self.write_marker(build_tools=True)
+        # Прогресс — 100%.
+        report(1.0)
+        # Зелёная строка.
+        bus.success("Сборочные утилиты setuptools и wheel установлены.")
 
     def ensure_tkinter(self, bus: EventBus, cancel: CancelToken, progress: ProgressHandler) -> None:
         """
