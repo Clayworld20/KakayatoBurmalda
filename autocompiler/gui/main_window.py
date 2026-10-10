@@ -32,8 +32,8 @@ import customtkinter as ctk
 from autocompiler import APP_NAME, APP_VERSION
 # Все настройки внешнего вида.
 from autocompiler.config import Behaviour, Colors, Fonts, Layout, Texts
-# Конвейер сборки и его настройки.
-from autocompiler.core.pipeline import BuildPipeline, BuildSettings
+# Конвейер сборки, его настройки и сканер импортов.
+from autocompiler.core.pipeline import BuildPipeline, BuildSettings, ImportScanner, compiler_stdlib_names
 # Красное окно ошибки.
 from autocompiler.gui.dialogs import ErrorDialog
 # Виджеты-«кирпичики».
@@ -68,6 +68,8 @@ class MainWindow(ctk.CTk):
         self._result_path: Optional[Path] = None
         # Фоновый поток сборки (None — сборка не идёт).
         self._worker: Optional[threading.Thread] = None
+        # Текущий конвейер сборки (нужен, чтобы отменить сборку при закрытии окна).
+        self._pipeline: Optional[BuildPipeline] = None
         # Флаг «идёт сборка».
         self._busy = False
         # Последняя папка, открытая в проводнике (чтобы не листать каждый раз заново).
@@ -395,10 +397,38 @@ class MainWindow(ctk.CTk):
         self.progress_bar.set(0)
         # Сообщаем в лог.
         self.log_console.append(f"Выбран файл: {path}", LogLevel.INFO)
+        # Сразу сканируем импорты, чтобы пользователь видел, что нужно программе.
+        self._preview_scan(path)
         # Обновляем статус.
         self._set_status(Texts.STATUS_READY, Colors.TEXT)
         # Разблокируем кнопку сборки.
         self._refresh_controls()
+
+    def _preview_scan(self, path: Path) -> None:
+        """Быстрый предварительный анализ импортов и ресурсов сразу после выбора файла."""
+        # Сканер только читает файлы, но ошибки (например, синтаксис) не должны мешать выбору.
+        try:
+            # Сканируем проект.
+            scan = ImportScanner(path).scan()
+            # Модули стандартной библиотеки.
+            stdlib = compiler_stdlib_names()
+            # Сторонние библиотеки.
+            libraries = [info.name for info in scan.third_party(stdlib)]
+            # Сообщаем о библиотеках.
+            if libraries:
+                self.log_console.append("Найдены библиотеки: " + ", ".join(libraries), LogLevel.SUCCESS)
+            # Библиотек нет.
+            else:
+                self.log_console.append("Сторонние библиотеки не используются.", LogLevel.INFO)
+            # Сообщаем о ресурсах.
+            if scan.data_entries:
+                # Имена ресурсов (папки — со слэшем).
+                names = [e.dest + "/" if e.is_dir else e.source.name for e in scan.data_entries]
+                # Строка в лог.
+                self.log_console.append("Найдены файлы ресурсов: " + ", ".join(names), LogLevel.INFO)
+        # Ошибка разбора — подробности будут на этапе «Анализ кода».
+        except Exception as exc:  # noqa: BLE001
+            self.log_console.append(f"Предварительный анализ не удался ({exc}). Подробности появятся при сборке.", LogLevel.WARNING)
 
     def _on_pick_icon(self) -> None:
         """Кнопка «Выбрать иконку (.ico)»."""
@@ -475,10 +505,10 @@ class MainWindow(ctk.CTk):
         self._set_busy(True)
         # Разделитель в логе для новой сборки.
         self.log_console.append("═" * 20 + "  Новая сборка  " + "═" * 20, LogLevel.DEBUG)
-        # Создаём конвейер сборки.
-        pipeline = BuildPipeline(settings, self.bus)
+        # Создаём конвейер сборки и запоминаем его (для отмены).
+        self._pipeline = BuildPipeline(settings, self.bus)
         # Фоновый поток-«демон» (не мешает закрыть программу).
-        self._worker = threading.Thread(target=pipeline.run, name="BuildWorker", daemon=True)
+        self._worker = threading.Thread(target=self._pipeline.run, name="BuildWorker", daemon=True)
         # Запускаем.
         self._worker.start()
 
@@ -506,6 +536,14 @@ class MainWindow(ctk.CTk):
         ):
             # Пользователь передумал.
             return
+        # Останавливаем сборку вместе с запущенными pip/PyInstaller, чтобы не оставить «зависших» процессов.
+        if self._pipeline is not None:
+            # Отмена не должна мешать закрытию окна.
+            try:
+                self._pipeline.cancel()
+            # Игнорируем любые ошибки отмены.
+            except Exception:  # noqa: BLE001
+                pass
         # Закрываем окно и завершаем программу.
         self.destroy()
 
@@ -561,6 +599,8 @@ class MainWindow(ctk.CTk):
         self._set_busy(False)
         # Поток больше не нужен.
         self._worker = None
+        # Конвейер тоже.
+        self._pipeline = None
         # Успех.
         if success:
             # Прогресс-бар до конца.
