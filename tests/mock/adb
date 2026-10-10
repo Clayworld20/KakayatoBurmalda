@@ -1,0 +1,160 @@
+#!/usr/bin/env bash
+# Фейковый adb для самопроверки wireless-adb-nowifi.sh (без реального устройства).
+# Режим: MOCK_MODE=usb-ok | denied | root-ok | hotspot-race
+# Состояние: каталог $MOCK_STATE (по умолчанию /tmp/mock-adb-state)
+set -uo pipefail
+
+MODE="${MOCK_MODE:-usb-ok}"
+STATE="${MOCK_STATE:-/tmp/mock-adb-state}"
+mkdir -p "$STATE"
+SETTINGS="$STATE/settings"
+PROPS="$STATE/props"
+RACE_N="$STATE/race_count"
+[ -f "$SETTINGS" ] || cat >"$SETTINGS" <<'EOF'
+adb_enabled=1
+adb_wifi_enabled=0
+adb_allowed_connection_time=604800000
+captive_portal_detection_enabled=1
+captive_portal_mode=1
+EOF
+[ -f "$PROPS" ] || cat >"$PROPS" <<'EOF'
+ro.build.version.sdk=35
+persist.adb.tls_server.enable=0
+service.adb.tcp.port=
+persist.adb.tcp.port=
+EOF
+
+sget(){ grep -m1 "^$1=" "$SETTINGS" 2>/dev/null | cut -d= -f2- ; }
+sput(){ grep -v "^$1=" "$SETTINGS" >"$SETTINGS.tmp" 2>/dev/null; printf '%s=%s\n' "$1" "$2" >>"$SETTINGS.tmp"; mv "$SETTINGS.tmp" "$SETTINGS"; }
+pget(){ grep -m1 "^$1=" "$PROPS" 2>/dev/null | cut -d= -f2- ; }
+pput(){ grep -v "^$1=" "$PROPS" >"$PROPS.tmp" 2>/dev/null; printf '%s=%s\n' "$1" "$2" >>"$PROPS.tmp"; mv "$PROPS.tmp" "$PROPS"; }
+
+# --- сетевые адреса устройства (имитация "Wi-Fi нет, есть USB-тетеринг") ---
+addr_show() {
+  # Имитация «Wi-Fi нет, есть проводной/USB-тетеринг»: loopback + eth0
+  local ip="${MOCK_IP:-192.168.42.129}"
+  printf '%s\n' \
+    "1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536" \
+    "    inet 127.0.0.1/8 scope host lo" \
+    "3: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500" \
+    "    inet ${ip}/24 brd ${ip%.*}.255 scope global eth0"
+}
+
+logcat_dump() {
+  case "$MODE" in
+    hotspot-race)
+      if [ "$(pget persist.adb.tls_server.enable)" = "1" ]; then
+        echo "I adbd    : adbwifi started on port 46161"
+      fi ;;
+    root-ok|usb-ok)
+      if [ "$(pget persist.adb.tls_server.enable)" = "1" ]; then
+        echo "I adbd    : adb wifi started on port 46161"
+      fi ;;
+  esac
+}
+
+# --- выполнение команды в "шелле устройства" ---
+dev_shell() {
+  local cmd="$1"
+  # развернуть su -c '...'
+  if [[ "$cmd" == su\ -c* ]]; then
+    local inner="${cmd#su -c }"
+    inner="${inner#\'}" ; inner="${inner%\'}"
+    inner="${inner//\\\'/\'}"
+    dev_shell "$inner"
+    return $?
+  fi
+  case "$cmd" in
+    "echo PING_OK")                      echo "PING_OK" ;;
+    "id -u"|"id")                        [ "$MODE" = root-ok ] && echo 0 || echo 2000 ;;
+    "settings get global "*)             sget "${cmd##* }" ;;
+    "settings put global "*)
+        local rest="${cmd#settings put global }" key val
+        key="${rest%% *}"; val="${rest#* }"
+        if [ "$MODE" = denied ] && [ "$HAVE_ROOT_OVERRIDE:-0" != 1 ]; then
+          echo "Permission denial: writing to settings requires:android.permission.WRITE_SECURE_SETTINGS" >&2
+        else
+          sput "$key" "$val"
+          # имитация AdbSettingsObserver: запись adb_wifi_enabled=1 поднимает демон
+          if [ "$key" = "adb_wifi_enabled" ] && [ "$val" = "1" ] && [ "$MODE" = hotspot-race ]; then
+            local n=0; [ -f "$RACE_N" ] && n="$(cat "$RACE_N")"
+            n=$((n+1)); echo "$n" >"$RACE_N"
+            if [ "$n" -ge 3 ]; then pput persist.adb.tls_server.enable 1; fi
+          fi
+        fi ;;
+    "getprop "*)                         pget "${cmd##* }" ;;
+    "setprop "*)
+        local rest="${cmd#setprop }" key val
+        key="${rest%% *}"; val="${rest#* }"
+        case "$MODE" in
+          denied) echo "setprop: failed to set property '$key' to '$val' (Permission denied)" >&2 ;;
+          *)      pput "$key" "$val" ;;
+        esac ;;
+    "ip -f inet addr show"*|"ifconfig"*|"netcfg"*) addr_show ;;
+    "logcat"*)                           logcat_dump ;;
+    "ss -tln"*|"ss -tlnp"*)
+        if [ "$(pget service.adb.tcp.port)" = "5555" ]; then
+          echo "LISTEN 0 4 *:5555 *:* users:((\"adbd\",pid=1,fd=3))"
+        fi ;;
+    "stop adbd"|"start adbd")            : ;;
+    "cmd wifi start-softap"|"svc wifi start-softap") echo "softap started" ;;
+    "am start"*)                         echo "Starting: Intent { ... }" ;;
+    *ADB_TRANSPORT_OK*)                  echo "ADB_TRANSPORT_OK"; echo "uid=2000(shell) gid=2000(shell) groups=2000(shell) context=u:r:shell:s0" ;;
+    *)                                   echo "" ;;
+  esac
+  return 0
+}
+
+# --- разбор аргументов adb ---
+args=("$@")
+serial=""
+i=0
+while [ $i -lt ${#args[@]} ]; do
+  if [ "${args[$i]}" = "-s" ]; then serial="${args[$((i+1))]}"; i=$((i+2)); else i=$((i+1)); fi
+done
+verb=""
+for a in "$@"; do
+  case "$a" in
+    -s) continue ;;
+    "$serial") continue ;;
+    devices|shell|tcpip|connect|disconnect|usb|pair) [ -z "$verb" ] && verb="$a" ;;
+  esac
+done
+
+case "$verb" in
+  devices)
+    echo "List of devices attached"
+    if [ "${MOCK_NO_DEVICES:-0}" != "1" ]; then
+      printf 'mockserial\tdevice\n'
+    fi
+    exit 0 ;;
+  shell)
+    cmd="${*#*shell }"
+    # убрать всё до и включая 'shell '
+    found=0; out_cmd=""
+    for a in "$@"; do
+      if [ $found = 1 ]; then out_cmd="${out_cmd:+$out_cmd }$a"; fi
+      if [ "$a" = "shell" ]; then found=1; fi
+    done
+    dev_shell "$out_cmd"
+    exit 0 ;;
+  tcpip)
+    port=""
+    for a in "$@"; do case "$a" in [0-9]*) port="$a" ;; esac; done
+    if [ "$MODE" = root-ok ] || [ "$MODE" = hotspot-race ]; then
+      echo "error: closed"
+      exit 1
+    fi
+    pput service.adb.tcp.port "$port"
+    echo "restarting in TCP mode port: $port"
+    exit 0 ;;
+  usb)  pput service.adb.tcp.port ""; echo "restarting in USB mode"; exit 0 ;;
+  connect)
+    target=""
+    for a in "$@"; do case "$a" in *:*) target="$a" ;; esac; done
+    echo "connected to ${target}"
+    exit 0 ;;
+  disconnect) echo "disconnected ${*: -1}"; exit 0 ;;
+  pair) echo "Successfully paired to ${*: -1} [guid=adb-mock]"; exit 0 ;;
+  *) echo "Android Debug Bridge version 1.0.41 (mock)"; exit 0 ;;
+esac

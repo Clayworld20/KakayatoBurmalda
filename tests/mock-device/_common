@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Общая часть моков «самого устройства»: всё перенаправляем в логику tests/mock/adb
+HERE="$(cd "$(dirname "${BASH_SOURCE[1]:-$0}")" && pwd)"
+MOCKDIR="$(cd "$HERE/../mock" && pwd)"
+run_mock() { exec "$MOCKDIR/adb" shell "$*"; }

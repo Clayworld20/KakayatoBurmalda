@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# su -c '<команда>'  →  выполнить её "от root" через логику мока
+HERE="$(cd "$(dirname "$0")" && pwd)"
+MOCKDIR="$(cd "$HERE/../mock" && pwd)"
+if [ "${1:-}" = "-c" ]; then
+  exec "$MOCKDIR/adb" shell "su -c '$2'"
+fi
+exec "$MOCKDIR/adb" shell "su $*"
