@@ -1,9 +1,9 @@
 # ============================================================================
 #  ВКЛАДКА "МОЗГ" (управление нейросетями) — pages/brain_page.py
 #  --------------------------------------------------------------------------
-#  Шаг 3: страница разделена на две зоны:
-#    СЛЕВА — бесплатный локальный ИИ: выбор модели и её скачивание через
-#            Ollama с живой полосой прогресса (в фоновом потоке, без зависаний).
+#  Шаг 3 (+ расширение списка моделей): страница разделена на две зоны:
+#    СЛЕВА — бесплатный локальный ИИ: 7 моделей в трёх категориях, подсказка
+#            о требованиях к памяти, скачивание через Ollama с прогресс-баром.
 #    СПРАВА — облачный ИИ: поля для API-ключей Claude / OpenAI, сохранение
 #             в config.json и кнопка "Проверить связь".
 # ============================================================================
@@ -21,12 +21,37 @@ from services import config_manager    # сохранение и чтение AP
 from services import cloud_api         # проверка облачных ключей Claude / OpenAI
 from services import ollama_client     # скачивание моделей через Ollama
 
-# Список моделей для выпадающего меню:
+# Список моделей для выпадающего меню, разбитый на три категории:
 # "понятная надпись" -> "техническое имя для Ollama"
 MODEL_CHOICES = {
-    "Легкая модель (для слабых ПК) — Llama 3.2 1B": "llama3.2:1b",
-    "Средняя модель (баланс скорости и ума) — Llama 3 8B": "llama3:8b",
-    "Мощная модель (требуется сильный ПК) — Qwen 2.5 14B": "qwen2.5:14b",
+    # --- Сверхлегкие (для старых ноутбуков и слабых ПК) ---
+    "Сверхлегкая (быстрая, мало памяти) — Llama 3.2 1B": "llama3.2:1b",
+    "Универсальная легкая (от Microsoft) — Phi-3.5 3.8B": "phi3.5",
+    # --- Оптимальные (золотой стандарт, нужен средний ПК с видеокартой) ---
+    "Стандартная умная (от Meta) — Llama 3 8B": "llama3:8b",
+    "Новая сбалансированная (рекомендуется) — Llama 3.1 8B": "llama3.1",
+    "Мощная и быстрая (от Alibaba) — Qwen 2.5 7B": "qwen2.5:7b",
+    # --- Тяжелые (для мощных игровых ПК с хорошей видеокартой) ---
+    "Продвинутая тяжелая (очень умная) — Qwen 2.5 14B": "qwen2.5:14b",
+    "Максимальная (требуется много VRAM) — Mistral Large 22B": "mistral-large",
+}
+
+# Подсказка для каждой модели: сколько памяти ей нужно (показывается под списком)
+MODEL_HINTS = {
+    "Сверхлегкая (быстрая, мало памяти) — Llama 3.2 1B":
+        "💡 Достаточно 4 ГБ оперативной памяти — подойдет даже старому ноутбуку.",
+    "Универсальная легкая (от Microsoft) — Phi-3.5 3.8B":
+        "💡 Рекомендуется 8 ГБ оперативной памяти. Умная, но при этом легкая.",
+    "Стандартная умная (от Meta) — Llama 3 8B":
+        "💡 Рекомендуется минимум 8 ГБ оперативной памяти, лучше с видеокартой.",
+    "Новая сбалансированная (рекомендуется) — Llama 3.1 8B":
+        "💡 Рекомендуется минимум 8 ГБ оперативной памяти. Лучший выбор для начала!",
+    "Мощная и быстрая (от Alibaba) — Qwen 2.5 7B":
+        "💡 Рекомендуется 8 ГБ оперативной памяти и любая видеокарта.",
+    "Продвинутая тяжелая (очень умная) — Qwen 2.5 14B":
+        "💡 Нужно 16 ГБ оперативной памяти или видеокарта с 12 ГБ видеопамяти.",
+    "Максимальная (требуется много VRAM) — Mistral Large 22B":
+        "⚠️ Требуется мощная видеокарта и очень много памяти. Только для игровых ПК!",
 }
 
 
@@ -131,14 +156,30 @@ class BrainPage(ctk.CTkFrame):
         # Выпадающий список моделей (CTkOptionMenu)
         self.model_menu = ctk.CTkOptionMenu(
             local_card,
-            values=list(MODEL_CHOICES.keys()),              # три понятных варианта
+            values=list(MODEL_CHOICES.keys()),              # семь понятных вариантов
             font=ctk.CTkFont(family=theme.FONT_FAMILY, size=12),
             fg_color=theme.COLOR_LINE,                      # тёмный фон меню
             button_color=theme.COLOR_ACCENT,                # синяя стрелочка справа
             button_hover_color=theme.COLOR_HOVER,           # подсветка при наведении
             height=36,                                      # повыше — удобнее нажимать
+            command=self.on_model_changed,                  # вызов при выборе модели
         )
-        self.model_menu.grid(row=4, column=0, padx=20, pady=(0, 14), sticky="ew")
+        self.model_menu.grid(row=4, column=0, padx=20, pady=(0, 6), sticky="ew")
+
+        # По умолчанию предлагаем рекомендованную (золотую середину)
+        self.model_menu.set("Новая сбалансированная (рекомендуется) — Llama 3.1 8B")
+
+        # Подсказка о требованиях выбранной модели (обновляется при выборе)
+        self.model_hint_label = ctk.CTkLabel(
+            local_card,
+            text="",                                        # текст подставит функция ниже
+            font=ctk.CTkFont(family=theme.FONT_FAMILY, size=12),
+            text_color=theme.COLOR_MUTED,                   # серый цвет по умолчанию
+            justify="left",
+            wraplength=360,                                 # переносить длинные подсказки
+        )
+        self.model_hint_label.grid(row=5, column=0, padx=20, pady=(0, 14), sticky="w")
+        self.apply_model_hint(self.model_menu.get())        # сразу показываем подсказку
 
         # Главная кнопка зоны: скачать и установить выбранную модель
         self.download_button = ctk.CTkButton(
@@ -151,7 +192,7 @@ class BrainPage(ctk.CTkFrame):
             hover_color=theme.COLOR_HOVER,                  # подсветка при наведении
             command=self.on_download_clicked,               # что делать при нажатии
         )
-        self.download_button.grid(row=5, column=0, padx=20, pady=(0, 14), sticky="ew")
+        self.download_button.grid(row=6, column=0, padx=20, pady=(0, 14), sticky="ew")
 
         # Полоса прогресса скачивания (по умолчанию пустая)
         self.model_progress = ctk.CTkProgressBar(
@@ -162,7 +203,7 @@ class BrainPage(ctk.CTkFrame):
             progress_color=theme.COLOR_ACCENT,              # синяя "заполненная" часть
         )
         self.model_progress.set(0)                          # начинаем с нуля
-        self.model_progress.grid(row=6, column=0, padx=20, pady=(0, 6), sticky="ew")
+        self.model_progress.grid(row=7, column=0, padx=20, pady=(0, 6), sticky="ew")
 
         # Текстовый статус скачивания: "Скачивание... 24%", ошибки и т.д.
         self.model_status_label = ctk.CTkLabel(
@@ -173,7 +214,7 @@ class BrainPage(ctk.CTkFrame):
             justify="left",
             wraplength=360,                                 # переносить длинные сообщения
         )
-        self.model_status_label.grid(row=7, column=0, padx=20, pady=(0, 8), sticky="w")
+        self.model_status_label.grid(row=8, column=0, padx=20, pady=(0, 8), sticky="w")
 
         # Маленькая кнопка "проверить Ollama ещё раз" (на случай, если её запустили позже)
         self.recheck_button = ctk.CTkButton(
@@ -187,7 +228,7 @@ class BrainPage(ctk.CTkFrame):
             text_color=theme.COLOR_MUTED,                   # серый текст
             command=self.start_ollama_check,                # при нажатии — перепроверить
         )
-        self.recheck_button.grid(row=8, column=0, padx=20, pady=(0, 16), sticky="w")
+        self.recheck_button.grid(row=9, column=0, padx=20, pady=(0, 16), sticky="w")
 
         # =====================================================================
         #  ЗОНА 2 (ПРАВАЯ КАРТОЧКА): облачный ИИ
@@ -319,6 +360,25 @@ class BrainPage(ctk.CTkFrame):
             anchor="w",                                     # текст прижат к левому краю
         )
         self.check_result_label.grid(row=8, column=0, padx=20, pady=(0, 16), sticky="ew")
+
+    # ------------------------------------------------------- ПОДСКАЗКА О МОДЕЛИ
+
+    def on_model_changed(self, choice):
+        """Вызывается, когда пользователь выбрал другую модель в списке."""
+        self.apply_model_hint(choice)               # показываем подсказку новой модели
+
+    def apply_model_hint(self, choice):
+        """Показывает под списком требования выбранной модели к памяти."""
+        hint_text = MODEL_HINTS.get(choice, "")     # достаём подсказку из словаря
+        if not hint_text:                           # на всякий случай: подсказки нет
+            hint_text = "💡 Выберите модель — подскажем, сколько нужно памяти."
+        hint_color = theme.COLOR_MUTED              # обычный серый цвет подсказки
+        if hint_text.startswith("⚠️"):              # тяжёлая модель — предупреждение
+            hint_color = theme.COLOR_WAIT           # покажем её жёлтым цветом
+        self.model_hint_label.configure(            # обновляем надпись и цвет
+            text=hint_text,
+            text_color=hint_color,
+        )
 
     # ------------------------------------------------------- КЛЮЧИ: ЗАГРУЗКА/СОХРАНЕНИЕ
 

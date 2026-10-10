@@ -222,7 +222,7 @@ class App(ctk.CTk):
         # --- Подпись версии в самом низу панели ----------------------------------
         version = ctk.CTkLabel(
             self.sidebar,
-            text="Версия 0.3 · Шаг 3",             # текущий этап разработки
+            text="Версия 0.4 · Шаг 4",             # текущий этап разработки
             font=ctk.CTkFont(family=theme.FONT_FAMILY, size=11),
             text_color=theme.COLOR_MUTED,          # почти незаметный серый
         )

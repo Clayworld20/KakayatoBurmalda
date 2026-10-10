@@ -5,6 +5,7 @@
 #  Ollama (http://localhost:11434/api/pull) и читает прогресс построчно.
 # ============================================================================
 
+import base64     # кодирование скриншотов в base64 (так картинки передаются модели)
 import json        # Ollama отвечает строчками в формате JSON — этот модуль их разбирает
 import requests    # библиотека для общения с программой Ollama
 
@@ -60,3 +61,54 @@ def pull_model(model_name, on_progress):
 
     # Поток ответа закончился — модель полностью скачана и установлена
     on_progress(100, "Готово! Модель установлена ✓")
+
+# ============================================================================
+#  ЧТЕНИЕ СПИСКА МОДЕЛЕЙ И ЧАТ (используется роботом из Шага 4)
+#  ----------------------------------------------------------------------------
+
+def list_installed_models():
+    """Спрашивает у Ollama список уже скачанных моделей. Возвращает их имена.
+
+    Если Ollama не запущена — вернёт пустой список (без ошибок и падений).
+    """
+    try:
+        answer = requests.get(OLLAMA_ADDRESS + "/api/tags", timeout=3)  # список моделей
+        data = answer.json()                       # разбираем JSON-ответ
+        # В ответе приходит список словарей — достаём из каждого поле "name"
+        return [model.get("name", "") for model in data.get("models", [])]
+    except Exception:
+        return []                                  # Ollama не отвечает — моделей нет
+
+
+def chat(model_name, prompt, image_path=None):
+    """Задаёт вопрос локальной модели и возвращает (успех, текст ответа).
+
+    model_name — имя модели, например "llama3.2:1b"
+    prompt     — текст задания
+    image_path — путь к скриншоту (необязательно; работает только у моделей,
+                 которые умеют видеть картинки)
+    """
+    message = {"role": "user", "content": prompt}  # письмо модели
+    if image_path:                                 # если есть скриншот — прикрепляем
+        try:
+            with open(image_path, "rb") as image_file:
+                encoded = base64.b64encode(image_file.read()).decode("utf-8")
+            message["images"] = [encoded]          # Ollama ждёт base64-текст картинки
+        except Exception:
+            pass                                   # без картинки, но всё равно ответит
+    try:
+        answer = requests.post(
+            OLLAMA_ADDRESS + "/api/chat",          # адрес чата Ollama
+            json={"model": model_name, "messages": [message], "stream": False},
+            timeout=120,                           # локальная модель думает долго — ждём 2 минуты
+        )
+    except Exception:
+        return False, "Ollama не отвечает"
+    if answer.status_code != 200:
+        return False, f"Ollama ответила ошибкой {answer.status_code}"
+    try:
+        data = answer.json()                       # разбираем ответ
+        text = data["message"]["content"]          # достаём текст сообщения
+        return True, text
+    except Exception:
+        return False, "не смог разобрать ответ Ollama"
