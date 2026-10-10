@@ -98,12 +98,14 @@
   ; Подпрограмма препроцессора: прочитать одну строку и, если это APP_VERSION, взять текст в кавычках.
   #sub ReadVersionLine
     #define VersionLine FileRead(VersionHandle)
+    #pragma message "DBG line: [" + VersionLine + "]"
     #if Pos("APP_VERSION", VersionLine) == 1
       #define AppVersion Copy(VersionLine, Pos('"', VersionLine) + 1, RPos('"', VersionLine) - Pos('"', VersionLine) - 1)
     #endif
   #endsub
   ; Открываем файл и читаем строки, пока не найдём версию или не дойдём до конца.
   #for {VersionHandle = FileOpen(VersionFile); VersionHandle && !FileEof(VersionHandle) && AppVersion == ""; ""} ReadVersionLine
+  #pragma message "DBG file=" + VersionFile + " handle=" + Str(VersionHandle) + " ver=[" + AppVersion + "]"
   ; Закрываем файл.
   #if VersionHandle
     #expr FileClose(VersionHandle)
