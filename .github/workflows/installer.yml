@@ -12,6 +12,9 @@
 #   4. Установленный Auto-Compiler (через python main.py --selftest) с нуля собирает
 #      тестовую программу tests/selftest/hello_app.py, и она успешно запускается.
 #   5. Программа удаляется встроенным деинсталлятором — проверяем, что всё убрано.
+#   Плюс два теста «нет интернета» (через файл hosts): без python.org установщик быстро и
+#   вежливо сдаётся, ничего не скопировав; без pypi.org — устанавливает программу, распознаёт
+#   сетевую ошибку pip и не зависает.
 #   6. AutoCompiler-Setup.exe выкладывается в «Artifacts» (а при публикации релиза — в релиз).
 
 # Название рабочего процесса на вкладке Actions.
@@ -176,6 +179,51 @@ jobs:
           # Аннотация вверху страницы запуска.
           Write-Host "::notice title=Установщик собран::AutoCompiler-Setup.exe, $size МБ, SHA-256 $hash"
 
+      # 4а. Негативный тест: python.org недоступен. Установщик обязан быстро и вежливо
+      #     сдаться (в тихом режиме — завершиться с ошибкой), ничего не скопировав и не зависнув.
+      - name: Тест «нет интернета» — python.org недоступен
+        # Жёсткий предел: если установщик «повиснет», шаг упадёт по тайм-ауту.
+        timeout-minutes: 5
+        # Команды PowerShell.
+        run: |
+          # Файл hosts Windows: через него «отключаем» python.org для этого компьютера.
+          $hosts = "$env:SystemRoot\System32\drivers\etc\hosts"
+          # Сохраняем исходное содержимое, чтобы потом вернуть.
+          $original = Get-Content $hosts -Raw
+          # Направляем python.org в никуда (127.0.0.1 — соединение сразу отклоняется).
+          Add-Content $hosts "`r`n127.0.0.1 www.python.org`r`n127.0.0.1 python.org"
+          # Сбрасываем кэш DNS, чтобы изменение подействовало сразу.
+          ipconfig /flushdns | Out-Null
+          # finally вернёт hosts в исходное состояние при любом исходе.
+          try {
+            # Журнал этой попытки.
+            $log = Join-Path $env:RUNNER_TEMP "setup-offline.log"
+            # Засекаем время.
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            # Тихая установка с обязательной загрузкой Python.
+            $p = Start-Process "installer\Output\AutoCompiler-Setup.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/FORCEPYTHON=1", "/LOG=`"$log`"" -Wait -PassThru
+            # Сколько секунд заняло.
+            $seconds = [math]::Round($watch.Elapsed.TotalSeconds)
+            # Журнал — в вывод шага.
+            Get-Content $log -Encoding utf8
+            # Строка с ошибкой скачивания из журнала.
+            $reason = Get-Content $log -Encoding utf8 | Where-Object { $_ -match 'Ошибка скачивания Python' } | Select-Object -First 1
+            # Установщик должен был завершиться с ошибкой…
+            if ($p.ExitCode -eq 0) { throw "Без доступа к python.org установщик почему-то завершился успешно" }
+            # …и именно из-за ошибки скачивания.
+            if (-not $reason) { throw "В журнале нет записи об ошибке скачивания Python" }
+            # Файлы программы не должны были копироваться.
+            if (Test-Path "$env:LOCALAPPDATA\Programs\Auto-Compiler\main.py") { throw "Файлы скопированы, хотя Python не установлен" }
+            # Итог — аннотацией.
+            Write-Host "::notice title=Тест «нет интернета» (python.org) пройден::Установщик сдался за $seconds с, код $($p.ExitCode), файлы не скопированы.%0A$reason"
+          }
+          finally {
+            # Возвращаем исходный hosts.
+            Set-Content $hosts $original -NoNewline
+            # Сбрасываем кэш DNS.
+            ipconfig /flushdns | Out-Null
+          }
+
       # 5. Тихая установка с обязательной загрузкой и установкой Python.
       - name: Тихая установка (Python скачивается и ставится установщиком)
         # Скачивание Python и библиотек — несколько минут.
@@ -314,6 +362,59 @@ jobs:
           # Python остаётся (это ожидаемо — им могут пользоваться другие программы).
           Write-Host "::notice title=Удаление::Программа, её среда сборки и ярлыки удалены; Python остался на компьютере, как и задумано."
 
+      # 7а. Негативный тест: Python уже есть, но pypi.org недоступен. Установка должна завершиться
+      #     (библиотеки докачаются при первом запуске программы), pip — распознать проблему с сетью.
+      - name: Тест «нет интернета» — pypi.org недоступен при установке библиотек
+        # Жёсткий предел против зависания.
+        timeout-minutes: 8
+        # Команды PowerShell.
+        run: |
+          # Убираем customtkinter из Python, чтобы pip действительно пришлось скачивать его заново.
+          & $env:APP_PYTHON -m pip uninstall -y customtkinter
+          # Файл hosts Windows.
+          $hosts = "$env:SystemRoot\System32\drivers\etc\hosts"
+          # Исходное содержимое.
+          $original = Get-Content $hosts -Raw
+          # «Отключаем» каталог библиотек PyPI и его файловый сервер.
+          Add-Content $hosts "`r`n127.0.0.1 pypi.org`r`n127.0.0.1 files.pythonhosted.org"
+          # Сбрасываем кэш DNS.
+          ipconfig /flushdns | Out-Null
+          # finally вернёт hosts при любом исходе.
+          try {
+            # Журнал этой попытки.
+            $log = Join-Path $env:RUNNER_TEMP "setup-nopypi.log"
+            # Засекаем время.
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            # Обычная тихая установка (Python уже установлен — его найдут в реестре).
+            $p = Start-Process "installer\Output\AutoCompiler-Setup.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/LOG=`"$log`"" -Wait -PassThru
+            # Сколько секунд заняло.
+            $seconds = [math]::Round($watch.Elapsed.TotalSeconds)
+            # Журнал — в вывод шага.
+            Get-Content $log -Encoding utf8
+            # Установка программы должна завершиться успешно (шаг с библиотеками пропускается).
+            if ($p.ExitCode -ne 0) { throw "Установщик завершился с кодом $($p.ExitCode)" }
+            # Python должен быть найден, а не скачан заново.
+            if (-not (Get-Content $log -Encoding utf8 | Where-Object { $_ -match 'Найден подходящий Python' })) { throw "Установщик не нашёл уже установленный Python" }
+            # Установщик должен был распознать именно сетевую проблему.
+            if (-not (Get-Content $log -Encoding utf8 | Where-Object { $_ -match 'Сетевая ошибка: 1' })) { throw "Сетевая ошибка pip не распознана" }
+            # Файлы программы и ярлык на месте.
+            if (-not (Test-Path "$env:APP_DIR\main.py")) { throw "Программа не установлена" }
+            # Итог — аннотацией.
+            Write-Host "::notice title=Тест «нет интернета» (pypi.org) пройден::Установка завершилась за $seconds с, сетевая ошибка pip распознана, шаг с библиотеками пропущен без зависания."
+          }
+          finally {
+            # Возвращаем исходный hosts.
+            Set-Content $hosts $original -NoNewline
+            # Сбрасываем кэш DNS.
+            ipconfig /flushdns | Out-Null
+          }
+          # Убираем эту установку, чтобы не мешать (тихое удаление и ожидание уборки).
+          Start-Process "$env:APP_DIR\unins000.exe" -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
+          # Ждём исчезновения файлов (до 2 минут).
+          $deadline = (Get-Date).AddMinutes(2)
+          # Ждём.
+          while ((Test-Path "$env:APP_DIR\main.py") -and ((Get-Date) -lt $deadline)) { Start-Sleep -Seconds 2 }
+
       # 8. Журналы — всегда (в том числе при ошибке), чтобы было что изучить.
       - name: Сохранение журналов
         # Даже если предыдущие шаги упали.
@@ -327,6 +428,8 @@ jobs:
           # Журнал установки и лог самопроверки.
           path: |
             ${{ runner.temp }}/setup.log
+            ${{ runner.temp }}/setup-offline.log
+            ${{ runner.temp }}/setup-nopypi.log
             ${{ runner.temp }}/selftest/build.log
           # Нет файлов — не ошибка.
           if-no-files-found: ignore
@@ -374,6 +477,7 @@ jobs:
             "* Размер: **$env:SETUP_SIZE МБ**",
             "* SHA-256: ``$env:SETUP_SHA256``",
             "* Проверено: тихая установка со скачиванием Python 3.12.10, библиотеки, ярлыки pythonw.exe, сборка тестовой программы, удаление.",
+            "* Проверено: поведение без доступа к python.org и к pypi.org (без зависаний, понятные ошибки).",
             "",
             "Скачать: блок **Artifacts** внизу этой страницы → **AutoCompiler-Setup**."
           )
