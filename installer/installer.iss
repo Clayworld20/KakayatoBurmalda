@@ -96,16 +96,16 @@
   ; Здесь окажется найденная версия.
   #define AppVersion ""
   ; Подпрограмма препроцессора: прочитать одну строку и, если это APP_VERSION, взять текст в кавычках.
+  ; Важно: внутри #sub используем присваивание (#expr X = …), а не #define — переменная,
+  ; объявленная через #define внутри подпрограммы, после её окончания не сохраняется.
   #sub ReadVersionLine
-    #define VersionLine FileRead(VersionHandle)
-    #pragma message "DBG line: [" + VersionLine + "]"
+    #expr VersionLine = FileRead(VersionHandle)
     #if Pos("APP_VERSION", VersionLine) == 1
-      #define AppVersion Copy(VersionLine, Pos('"', VersionLine) + 1, RPos('"', VersionLine) - Pos('"', VersionLine) - 1)
+      #expr AppVersion = Copy(VersionLine, Pos('"', VersionLine) + 1, RPos('"', VersionLine) - Pos('"', VersionLine) - 1)
     #endif
   #endsub
   ; Открываем файл и читаем строки, пока не найдём версию или не дойдём до конца.
   #for {VersionHandle = FileOpen(VersionFile); VersionHandle && !FileEof(VersionHandle) && AppVersion == ""; ""} ReadVersionLine
-  #pragma message "DBG file=" + VersionFile + " handle=" + Str(VersionHandle) + " ver=[" + AppVersion + "]"
   ; Закрываем файл.
   #if VersionHandle
     #expr FileClose(VersionHandle)
@@ -115,6 +115,8 @@
     #error Не удалось прочитать APP_VERSION из autocompiler\__init__.py. Укажите версию вручную: ISCC /DAppVersion=1.0.0 installer.iss
   #endif
 #endif
+; Показываем найденную версию в выводе компилятора (для самоконтроля).
+#pragma message "Версия Auto-Compiler: " + AppVersion
 
 
 ; ----------------------------------------------------------------------------
