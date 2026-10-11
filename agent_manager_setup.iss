@@ -33,7 +33,7 @@ DefaultGroupName={#MyAppName}                        ; имя папки в ме
 ; --- Куда ставим и с какими правами --------------------------------------------
 ; {localappdata} = %LOCALAPPDATA%\Programs\... — установка БЕЗ прав администратора
 DefaultDirName={localappdata}\Programs\AIAgentManager
-PrivilegesRequired=lowest                            ; просим только права обычного пользователя
+PrivilegesRequired=none                            ; просим только права обычного пользователя
 
 ; --- Внешний вид: ТЁМНАЯ современная тема Windows 11 (Inno Setup 6.6+) ---------
 WizardStyle=modern dark                              ; тёмный мастер установки
