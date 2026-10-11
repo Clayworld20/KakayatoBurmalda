@@ -273,6 +273,17 @@ namespace KakayatoBurmalda.Forklift
         [SerializeField, Tooltip("Учитывать массу груза: с паллетой на вилах погрузчик тяжелее.")]
         private bool applyCargoWeight = true;
 
+        [SerializeField, Tooltip("Поднимать вилы в момент захвата груза: паллета отрывается от земли и едет на клиренсе, " +
+                                 "поэтому вилы и скос-заезд не цепляют землю и не «застревают».")]
+        private bool liftOnLock = true;
+
+        [SerializeField, Min(0f), Tooltip("На сколько поднять вилы в момент захвата груза (от нижнего положения), м.")]
+        private float liftOnLockHeight = 0.14f;
+
+        [SerializeField, Tooltip("Вилы, каретка и скос не сталкиваются с землёй: даже если корпус просядет под тяжёлым грузом, " +
+                                 "вилы не врезаются в землю. Скос при этом по-прежнему поддевает паллеты (слой Cargo не затронут).")]
+        private bool ignoreGroundCollisionsForForks = true;
+
         #endregion
 
         #region Ввод
@@ -354,6 +365,7 @@ namespace KakayatoBurmalda.Forklift
         private bool resetRequested;
         private float stalledTime;
         private bool stallWarningLogged;
+        private bool controlEnabled = true;
 
         private Vector3 startPosition;
         private Quaternion startRotation;
@@ -379,6 +391,24 @@ namespace KakayatoBurmalda.Forklift
 
         /// <summary>Сколько паллет находится в объёме захвата (включая зафиксированные).</summary>
         public int CargoInVolumeCount { get { return cargoInVolumeCount; } }
+
+        /// <summary>
+        /// Читает ли погрузчик управление. Меню настройки камеры (F1) выключает управление,
+        /// пока открыто: машина стоит на месте, клавиши не «уезжают» вместе с настройкой.
+        /// </summary>
+        public bool ControlEnabled
+        {
+            get { return controlEnabled; }
+            set
+            {
+                controlEnabled = value;
+
+                if (!controlEnabled)
+                {
+                    ReleaseInput();
+                }
+            }
+        }
 
         /// <summary>Текущая высота вил (локальная Y каретки).</summary>
         public float ForkHeight { get { return currentForkHeight; } }
@@ -450,6 +480,7 @@ namespace KakayatoBurmalda.Forklift
 
             GroundNormal = Vector3.up;
             ResolveGroundLayers();
+            RefreshForkGroundIgnores();
 
             if (IsLayerInMask(gameObject.layer, groundLayers) && groundCheck == null)
             {
@@ -496,18 +527,25 @@ namespace KakayatoBurmalda.Forklift
 #endif
         }
 
+        private void Start()
+        {
+            // Сцена к этому моменту собрана до конца: перепроверяем коллайдеры земли
+            // (важно, если уровень достраивался в рантайме).
+            RefreshForkGroundIgnores();
+        }
+
         private void Update()
         {
             ReadInput();
 
 #if ENABLE_LEGACY_INPUT_MANAGER
-            if (readKeyboardInput && Input.GetKeyDown(resetKey))
+            if (readKeyboardInput && controlEnabled && Input.GetKeyDown(resetKey))
             {
                 RequestReset();
             }
 
             // F — взять груз на вилы либо отпустить уже зафиксированный.
-            if (readKeyboardInput && Input.GetKeyDown(grabKey))
+            if (readKeyboardInput && controlEnabled && Input.GetKeyDown(grabKey))
             {
                 grabRequested = true;
             }
@@ -559,6 +597,7 @@ namespace KakayatoBurmalda.Forklift
             lockAlignDuration = Mathf.Max(0.02f, lockAlignDuration);
             relockDelay = Mathf.Max(0f, relockDelay);
             autoReleaseLiftHeight = Mathf.Max(0f, autoReleaseLiftHeight);
+            liftOnLockHeight = Mathf.Max(0f, liftOnLockHeight);
         }
 
         #endregion
@@ -662,6 +701,12 @@ namespace KakayatoBurmalda.Forklift
             releaseRequested = true;
         }
 
+        /// <summary>Включить/выключить управление погрузчиком (меню камеры, пауза, катсцена).</summary>
+        public void SetControlEnabled(bool enabled)
+        {
+            ControlEnabled = enabled;
+        }
+
         /// <summary>Есть ли паллета на вилах хотя бы у одного погрузчика сцены. Используется зонами сортировки.</summary>
         public static bool IsCargoCarriedByAnyForklift(CargoPallet pallet)
         {
@@ -698,8 +743,33 @@ namespace KakayatoBurmalda.Forklift
 
         #region Чтение ввода
 
+        /// <summary>Полностью погасить ввод: газ, руль, вилы, наклон, ручник и запросы захвата/сброса.</summary>
+        private void ReleaseInput()
+        {
+            throttleInput = 0f;
+            steerInput = 0f;
+            liftInput = 0f;
+            tiltInput = 0f;
+            handbrakeInput = false;
+            externalThrottle = 0f;
+            externalSteer = 0f;
+            externalLift = 0f;
+            externalTilt = 0f;
+            externalHandbrake = false;
+            currentMotor = 0f;
+            grabRequested = false;
+            releaseRequested = false;
+        }
+
         private void ReadInput()
         {
+            if (!controlEnabled)
+            {
+                // Управление забрано снаружи (меню настройки камеры по F1): погрузчик стоит.
+                ReleaseInput();
+                return;
+            }
+
             float keyboardThrottle = 0f;
             float keyboardSteer = 0f;
             float keyboardLift = 0f;
@@ -835,6 +905,75 @@ namespace KakayatoBurmalda.Forklift
             Debug.Log(string.Format(
                 "[ForkliftController] Маска земли не задана — использую слой «Ground» (индекс {0}).",
                 groundLayerIndex), this);
+        }
+
+        /// <summary>
+        /// Отключить взаимные столкновения вил (каретки и скоса) с коллайдерами земли.
+        /// Скос висит в 4,5 см над полом, а под грузом корпус проседает глубже — без этой
+        /// настройки вилы врезаются в землю и машина «застревает». Слой Cargo не затронут:
+        /// паллеты по-прежнему поддеваются скосом и едут по вилам.
+        /// </summary>
+        [ContextMenu("Вилы игнорируют землю (обновить)")]
+        public void RefreshForkGroundIgnores()
+        {
+            if (!ignoreGroundCollisionsForForks || forkCarriage == null)
+            {
+                return;
+            }
+
+            Collider[] forkColliders = forkCarriage.GetComponentsInChildren<Collider>(true);
+
+            if (forkColliders.Length == 0)
+            {
+                return;
+            }
+
+            int groundLayerIndex = LayerMask.NameToLayer("Ground");
+
+            if (groundLayerIndex < 0)
+            {
+                return;
+            }
+
+            Collider[] sceneColliders = FindObjectsOfType<Collider>();
+            int ignoredPairs = 0;
+
+            for (int i = 0; i < sceneColliders.Length; i++)
+            {
+                Collider groundCollider = sceneColliders[i];
+
+                if (groundCollider == null || groundCollider.gameObject.layer != groundLayerIndex)
+                {
+                    continue;
+                }
+
+                // Технику и груз (у них есть Rigidbody) не трогаем: вилы должны их толкать.
+                if (groundCollider.attachedRigidbody != null)
+                {
+                    continue;
+                }
+
+                for (int j = 0; j < forkColliders.Length; j++)
+                {
+                    Collider forkCollider = forkColliders[j];
+
+                    if (forkCollider == null || forkCollider == groundCollider)
+                    {
+                        continue;
+                    }
+
+                    Physics.IgnoreCollision(forkCollider, groundCollider, true);
+                    ignoredPairs++;
+                }
+            }
+
+            if (ignoredPairs > 0)
+            {
+                Debug.Log(string.Format(
+                    "[ForkliftController] Вилы не сталкиваются с землёй: отключено пар столкновений — {0}. " +
+                    "Скос держится в 4,5 см над полом, под грузом корпус проседает, и без этого вилы «застревали» бы в земле.",
+                    ignoredPairs), this);
+            }
         }
 
         private static bool IsLayerInMask(int layer, LayerMask mask)
@@ -983,6 +1122,14 @@ namespace KakayatoBurmalda.Forklift
             state.targetLocalPosition = ComputeForkSlotPosition(pallet);
             state.targetLocalRotation = Quaternion.identity;
             lockedCargo.Add(state);
+
+            if (liftOnLock)
+            {
+                // «Магнит» поднимает груз: паллета отрывается от земли, вилы и скос уходят
+                // на клиренс перевозки, поэтому ничего не цепляет землю.
+                float carryHeight = Mathf.Clamp(forkMinHeight + liftOnLockHeight, forkMinHeight, forkMaxHeight);
+                targetForkHeight = Mathf.Max(targetForkHeight, carryHeight);
+            }
 
             liftedSinceLock = false;
             UpdateCarryMass();

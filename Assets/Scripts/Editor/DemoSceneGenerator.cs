@@ -34,7 +34,8 @@ namespace KakayatoBurmalda.Forklift.EditorTools
     ///     ├── CargoPallets/…             — паллеты с грузом (ящики, бочки, стройматериалы), CargoPallet + Rigidbody
     ///     ├── GameManager                — менеджер игры
     ///     ├── GameCanvas (опционально)   — HUD со скриптом GameUIController
-    ///     └── Main Camera (опционально)  — CameraFollow: плавный вид от третьего лица
+    ///     └── Main Camera (опционально)  — CameraFollow (кабинный обзор: вилы и груз видны)
+    ///                                          + CameraSettingsMenu: настройка камеры по F1
     ///
     /// Все ссылки в инспекторах (каретка вил, визуальные колёса, маски слоёв, целевые типы груза,
     /// настройки захвата, ссылки HUD и цель камеры) назначаются кодом через SerializedObject,
@@ -123,7 +124,7 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             [Tooltip("Перед генерацией удалить ранее сгенерированные демо-объекты (DemoScene и объекты сцены).")]
             public bool clearExistingDemoObjects = true;
 
-            [Tooltip("Добавить на камеру CameraFollow: плавный вид от третьего лица сзади-сверху.")]
+            [Tooltip("Добавить на камеру CameraFollow (обзор погрузчика) и CameraSettingsMenu: настройка камеры по F1.")]
             public bool attachCameraToForklift = true;
 
             [Range(-180f, 180f), Tooltip("Начальный поворот погрузчика по оси Y, градусы. 0 — вилы смотрят на паллеты и амбар (+Z).")]
@@ -430,7 +431,8 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 if (options.attachCameraToForklift)
                 {
                     EditorUtility.DisplayProgressBar("Генерация демо-сцены", "Камера...", 0.96f);
-                    AttachCameraToForklift(scene, forklift.transform);
+                    Camera demoCamera = AttachCameraToForklift(scene, forklift.transform);
+                    EnsureCameraSettingsMenu(demoCamera);
                 }
 
                 EditorUtility.DisplayProgressBar("Генерация демо-сцены", "Проверка сцены...", 0.98f);
@@ -579,13 +581,21 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 issues.Add("нет слоя Ground — погрузчик будет считать землёй всю общую маску");
             }
 
-            if (options.attachCameraToForklift && UnityEngine.Object.FindObjectOfType<CameraFollow>() == null)
+            if (options.attachCameraToForklift)
             {
-                issues.Add("камера не получила CameraFollow — обзор не будет следовать за погрузчиком");
+                if (UnityEngine.Object.FindObjectOfType<CameraFollow>() == null)
+                {
+                    issues.Add("камера не получила CameraFollow — обзор не будет следовать за погрузчиком");
+                }
+
+                if (UnityEngine.Object.FindObjectOfType<CameraSettingsMenu>() == null)
+                {
+                    issues.Add("на камере нет CameraSettingsMenu — настройка камеры по F1 недоступна");
+                }
             }
 
             string summary = string.Format(
-                "[DemoSceneGenerator] Проверка сцены: паллет {0} (ящики {1}, бочки {2}, стройматериалы {3}), зон сортировки {4}, дом {5}, амбар {6}, HUD {7}.",
+                "[DemoSceneGenerator] Проверка сцены: паллет {0} (ящики {1}, бочки {2}, стройматериалы {3}), зон сортировки {4}, дом {5}, амбар {6}, HUD {7}, камера {8}.",
                 pallets.Length,
                 palletsByType[(int)CargoType.Boxes],
                 palletsByType[(int)CargoType.Barrels],
@@ -593,7 +603,8 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 zones.Length,
                 house != null ? "есть" : "нет",
                 barn != null ? "есть" : "нет",
-                options.createHud ? "есть" : "нет");
+                options.createHud ? "есть" : "нет",
+                options.attachCameraToForklift ? "с меню F1" : "без слежения");
 
             if (issues.Count == 0)
             {
@@ -865,16 +876,21 @@ namespace KakayatoBurmalda.Forklift.EditorTools
         }
 
         /// <summary>
-        /// Навесить на камеру слежение от третьего лица (<see cref="CameraFollow"/>).
-        /// Камера остаётся в корне сцены: её не трясёт физика погрузчика, а позицию и взгляд
-        /// ведёт CameraFollow (SmoothDamp по позиции, Slerp по взгляду).
+        /// Навесить на камеру обзор погрузчика (<see cref="CameraFollow"/>). Поза по умолчанию —
+        /// рабочая: камера сбоку над вилами, ось взгляда уходит вперёд-вниз на кончики вил, поэтому
+        /// обе вилы, паллета, груз и дорога остаются в кадре (проверено расчётом по фактической
+        /// геометрии модели, см. Tools/camera_check.py). Из-за спины (сзади-сверху) вилы не видны:
+        /// их закрывают корпус, кабина и защитная решётка. Камера остаётся в корне сцены: её не трясёт физика
+        /// погрузчика, а позицию и взгляд ведёт CameraFollow (SmoothDamp по позиции, Slerp по взгляду).
+        /// Поза, сохранённая кнопкой «Сохранить» в меню F1, имеет приоритет над значениями по умолчанию.
+        /// Возвращает камеру, чтобы следом навесить на неё меню настройки.
         /// </summary>
-        private static void AttachCameraToForklift(Scene scene, Transform forklift)
+        private static Camera AttachCameraToForklift(Scene scene, Transform forklift)
         {
             Camera camera = FindActiveComponentInScene<Camera>(scene);
             if (camera == null)
             {
-                return;
+                return null;
             }
 
             Transform cameraTransform = camera.transform;
@@ -893,25 +909,60 @@ namespace KakayatoBurmalda.Forklift.EditorTools
                 follow = Undo.AddComponent<CameraFollow>(cameraTransform.gameObject);
             }
 
+            // Умолчания уже прописаны в полях CameraFollow (кабинная поза). Если в меню F1 позу
+            // сохранили кнопкой «Сохранить», она ложится в EditorPrefs и здесь подхватывается —
+            // так подобранная в игре камера становится настройкой сцены.
+            follow.LoadSettingsFromEditorPrefs();
+
             ApplySerializedChanges(follow, serializedObject =>
             {
                 SetObjectReference(serializedObject, "target", forklift);
-                SetVector3(serializedObject, "offset", new Vector3(0f, 4.6f, -8.6f));
-                SetFloat(serializedObject, "pivotHeight", 1.5f);
-                SetFloat(serializedObject, "positionSmoothTime", 0.3f);
-                SetFloat(serializedObject, "yawSmoothTime", 0.45f);
-                SetFloat(serializedObject, "rotationSharpness", 6f);
-                SetVector3(serializedObject, "lookOffset", new Vector3(0f, 1.3f, 1.8f));
-                SetFloat(serializedObject, "minHeight", 1.5f);
+                SetVector3(serializedObject, "offset", follow.Offset);
+                SetFloat(serializedObject, "pivotHeight", follow.PivotHeight);
+                SetFloat(serializedObject, "positionSmoothTime", follow.PositionSmoothTime);
+                SetFloat(serializedObject, "yawSmoothTime", follow.YawSmoothTime);
+                SetFloat(serializedObject, "rotationSharpness", follow.RotationSharpness);
+                SetVector3(serializedObject, "lookOffset", follow.LookOffset);
+                SetFloat(serializedObject, "minHeight", follow.MinHeight);
+                SetFloat(serializedObject, "fieldOfView", follow.FieldOfView);
                 SetBool(serializedObject, "snapOnStart", true);
             });
 
-            camera.fieldOfView = 62f;
+            camera.fieldOfView = follow.FieldOfView > 1f ? follow.FieldOfView : 62f;
             camera.nearClipPlane = 0.1f;
             camera.farClipPlane = 500f;
 
             // Сразу ставим камеру на место: кадр виден ещё до запуска игры.
             follow.SnapToTarget();
+
+            return camera;
+        }
+
+        /// <summary>
+        /// Навесить на камеру меню настройки позы (клавиша F1): ползунки, пресеты и сохранение
+        /// подобранной позы в EditorPrefs. Меню — служебное окно IMGUI, ему не нужны Canvas и EventSystem.
+        /// </summary>
+        private static void EnsureCameraSettingsMenu(Camera camera)
+        {
+            if (camera == null)
+            {
+                return;
+            }
+
+            CameraSettingsMenu menu = camera.GetComponent<CameraSettingsMenu>();
+
+            if (menu == null)
+            {
+                menu = Undo.AddComponent<CameraSettingsMenu>(camera.gameObject);
+            }
+
+            ApplySerializedChanges(menu, serializedObject =>
+            {
+                SetInt(serializedObject, "toggleKey", (int)KeyCode.F1);
+                SetBool(serializedObject, "openOnStart", false);
+                SetBool(serializedObject, "lockCursorDuringPlay", true);
+                SetBool(serializedObject, "lockForkliftWhileOpen", true);
+            });
         }
 
         #endregion
@@ -1819,6 +1870,12 @@ namespace KakayatoBurmalda.Forklift.EditorTools
             BoxCollider forkCollider = forkCarriage.AddComponent<BoxCollider>();
             forkCollider.center = new Vector3(0f, 0f, 0.7f);
             forkCollider.size = new Vector3(1.3f, 0.14f, 1.7f);
+
+            if (chassisMaterial != null)
+            {
+                // Низкое трение и на самих вилах: паллета легче заезжает по скосу и не «залипает».
+                forkCollider.sharedMaterial = chassisMaterial;
+            }
 
             BoxCollider carriagePlateCollider = forkCarriage.AddComponent<BoxCollider>();
             carriagePlateCollider.center = new Vector3(0f, 0.5f, 0.02f);
