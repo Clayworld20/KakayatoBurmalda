@@ -1,123 +1,101 @@
 ﻿; ============================================================================
-;  ИНСТАЛЛЯТОР "AI AGENT MANAGER" (agent_manager_setup.iss)
+;  ИНСТАЛЛЯТОР "AI AGENT MANAGER" (agent_manager_setup.iss) — версия 2, надежная
 ;  --------------------------------------------------------------------------
-;  Что делает этот установщик:
-;    1) копирует исходники программы в %LOCALAPPDATA%\Programs\AIAgentManager
-;       (права администратора НЕ нужны — ставим только для текущего пользователя);
-;    2) проверяет систему: если нет полноценного Python 3.10+ — САМ тихо
-;       устанавливает Python 3.12.10 (файл зашит внутрь инсталлятора);
-;    3) ставит библиотеки ТОЛЬКО готовыми Windows-сборками (--only-binary=:all:),
-;       поэтому pip физически не может начать компиляцию Pillow — зависаний нет;
-;    4) создаёт красивый значок на рабочем столе: программа запускается через
-;       pythonw.exe — без чёрного окна консоли.
-;
-;  Требуется Inno Setup 6.6 или новее (для тёмной темы WizardStyle=dark).
+;  Что делает установщик:
+;    1) копирует программу в %LOCALAPPDATA%\Programs\AIAgentManager (без админа);
+;    2) если нет Python 3.10+ — тихо ставит Python 3.12.10, который ЛЕЖИТ ВНУТРИ
+;       установщика (файл bootstrap\python-3.12.10-amd64.exe — его при сборке
+;       кладет GitHub Actions, скачав с python.org);
+;    3) ставит библиотеки только готовыми сборками (--only-binary=:all:) —
+;       компиляция Pillow и зависания невозможны;
+;    4) создает значок на рабочем столе, запуск через pythonw.exe (без консоли).
 ; ============================================================================
 
-; --- СЛОВАРИ ПРЕПРОЦЕССОРА (настройки сверху, чтобы легко менять) --------------
+; --- НАСТРОЙКИ (без комментариев в строке — препроцессор их не любит) -----------
 
-#define MyAppName "AI Agent Manager"                                 ; имя программы
-#define MyAppVersion "1.0"                                           ; версия установки
-#define MyAppPublisher "AI Agent Manager Project"                    ; кто выпустил
-#define PythonInstallerName "python-3.12.10-amd64.exe"               ; имя файла Python
-#define PythonInstallerUrl "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe" ; откуда качаем при сборке
+#define MyAppName "AI Agent Manager"
+#define MyAppVersion "1.1"
+#define MyAppPublisher "AI Agent Manager Project"
 
 [Setup]
-; --- Идентификация программы ---------------------------------------------------
-AppId={{8F1E9C42-6B7D-4E3A-9A21-C5D4B0A7F123}       ; уникальный номер (двойной {{ — экранирование)
-AppName={#MyAppName}                                 ; название в списке программ
-AppVersion={#MyAppVersion}                           ; версия программы
-AppPublisher={#MyAppPublisher}                       ; издатель
-DefaultGroupName={#MyAppName}                        ; имя папки в меню "Пуск"
-
-; --- Куда ставим и с какими правами --------------------------------------------
-; {localappdata} = %LOCALAPPDATA%\Programs\... — установка БЕЗ прав администратора
+; --- Идентификация программы ---
+AppId={{8F1E9C42-6B7D-4E3A-9A21-C5D4B0A7F123}
+AppName={#MyAppName}
+AppVersion={#MyAppVersion}
+AppPublisher={#MyAppPublisher}
+DefaultGroupName={#MyAppName}
+; --- Установка в папку пользователя, БЕЗ прав администратора ---
 DefaultDirName={localappdata}\Programs\AIAgentManager
-PrivilegesRequired=none                            ; просим только права обычного пользователя
+PrivilegesRequired=none
+; --- ТЕМНАЯ тема Windows 11 (требуется Inno Setup 6.6+) ---
+WizardStyle=modern dark
+DisableProgramGroupPage=yes
+; --- Значки и имя файла на выходе ---
+SetupIconFile=assets\icon.ico
+UninstallDisplayIcon={app}\assets\icon.ico
+OutputBaseFilename=AI-Agent-Manager-Setup
+; --- Сжатие и журнал ---
+Compression=lzma2
+SolidCompression=yes
+SetupLogging=yes
 
-; --- Внешний вид: ТЁМНАЯ современная тема Windows 11 (Inno Setup 6.6+) ---------
-WizardStyle=modern dark                              ; тёмный мастер установки
-DisableProgramGroupPage=yes                          ; не спрашиваем про папку меню "Пуск"
-
-; --- Иконки и имя файла на выходе ----------------------------------------------
-SetupIconFile=assets\icon.ico                        ; значок самого установщика
-UninstallDisplayIcon={app}\assets\icon.ico           ; значок в "Установке и удалении программ"
-OutputBaseFilename=AI-Agent-Manager-Setup            ; итоговый файл: AI-Agent-Manager-Setup.exe
-
-; --- Сжатие и служебное ---------------------------------------------------------
-Compression=lzma2                                    ; сильное сжатие (файл меньше)
-SolidCompression=yes                                 ; ещё лучше сжимаем файлы
-SetupLogging=yes                                     ; лог установки (помогает при поддержке)
-
-; --- Что спрашиваем у пользователя ----------------------------------------------
+; --- Вопросы пользователю: только значок на рабочий стол ---
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
-; --- Файлы, которые попадают внутрь установщика ---------------------------------
+; --- Файлы внутри установщика ---
 [Files]
-; Исходники программы — в папку установки
+; Сама программа
 Source: "main.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "theme.py"; DestDir: "{app}"; Flags: ignoreversion
 Source: "requirements.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "README.md"; DestDir: "{app}"; Flags: ignoreversion
-; Папки со вкладками и сервисами (исключаем служебный __pycache__)
+; Папки со вкладками и сервисами (без служебного __pycache__)
 Source: "pages\*"; DestDir: "{app}\pages"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__,*.pyc"
 Source: "services\*"; DestDir: "{app}\services"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "__pycache__,*.pyc"
-; Иконка — пригодится для ярлыков и "Установки и удаления программ"
+; Значок
 Source: "assets\icon.ico"; DestDir: "{app}\assets"; Flags: ignoreversion
-; Установщик Python 3.12.10: СКАЧИВАЕТСЯ НА ЭТАПЕ СБОРКИ и зашивается внутрь.
-; Флаг DownloadKompatibelAndOverwrite — докачка с python.org, если связь дрогнула.
-; При установке файл распакуется в кэш %LOCALAPPDATA%\AI-Agent-Manager\bootstrap
-Source: "{#PythonInstallerUrl}"; DestDir: "{localappdata}\AI-Agent-Manager\bootstrap"; DestName: "{#PythonInstallerName}"; Flags: ignoreversion DownloadKompatibelAndOverwrite
+; Установщик Python: обычный ЛОКАЛЬНЫЙ файл из папки bootstrap.
+; Распаковывается во временную папку и удаляется после установки.
+Source: "bootstrap\python-3.12.10-amd64.exe"; DestDir: "{tmp}"; DestName: "python-3.12.10-amd64.exe"; Flags: ignoreversion deleteafterinstall
 
-; --- Ярлыки ---------------------------------------------------------------------
+; --- Ярлыки ---
 [Icons]
-; Ярлык на рабочем столе (только если пользователь поставил галочку).
-; Запускаем через pythonw.exe (функция PythonWindowedExecutablePath) — БЕЗ чёрной консоли
-Name: "{userdesktop}\{#MyAppName}"; Filename: "{code:PythonWindowedExecutablePath}"; Parameters: """{app}\main.py"""; WorkingDir: "{app}"; IconFilename: "{app}\assets\icon.ico"; Comment: "Центр управления нейросетями и роботом-помощником"; Tasks: desktopicon
-; Ярлык в меню "Пуск"
-Name: "{group}\{#MyAppName}"; Filename: "{code:PythonWindowedExecutablePath}"; Parameters: """{app}\main.py"""; WorkingDir: "{app}"; IconFilename: "{app}\assets\icon.ico"; Comment: "Центр управления нейросетями и роботом-помощником"
-; Ярлык удаления в меню "Пуск"
+; На рабочий стол (если пользователь оставил галочку); pythonw.exe = без консоли
+Name: "{userdesktop}\{#MyAppName}"; Filename: "{code:PythonWExe}"; Parameters: """{app}\main.py"""; WorkingDir: "{app}"; IconFilename: "{app}\assets\icon.ico"; Comment: "Центр управления нейросетями и роботом-помощником"; Tasks: desktopicon
+; В меню "Пуск"
+Name: "{group}\{#MyAppName}"; Filename: "{code:PythonWExe}"; Parameters: """{app}\main.py"""; WorkingDir: "{app}"; IconFilename: "{app}\assets\icon.ico"; Comment: "Центр управления нейросетями и роботом-помощником"
+; Удаление программы
 Name: "{group}\Удалить {#MyAppName}"; Filename: "{uninstallexe}"
 
-; --- Что запускать во время установки (порядок важен: сверху вниз) --------------
+; --- Шаги установки (выполняются строго сверху вниз) ---
 [Run]
-; ШАГ 1. Если Python не найден — тихо ставим зашитый Python 3.12.10 в профиль
-; пользователя (без прав администратора) и добавляем его в PATH.
-; Флаги в точности как требовалось: /quiet InstallAllUsers=0 PrependPath=1 Include_tcltk=1
-Filename: "{code:PythonExecutablePath}"; \
+; ШАГ 1: если Python 3.10+ не найден — тихо ставим свой Python в профиль пользователя
+Filename: "{tmp}\python-3.12.10-amd64.exe"; \
   Parameters: "/quiet InstallAllUsers=0 PrependPath=1 Include_tcltk=1 Include_test=0"; \
-  StatusMsg: "Устанавливаю Python 3.12, это займёт одну-две минуты..."; \
+  StatusMsg: "Устанавливаю Python 3.12, это займет одну-две минуты..."; \
   Flags: runhidden; \
-  Check: PythonSetupRequiredCheck
+  Check: NeedInstallPython
 
-; ШАГ 2. Ставим библиотеки ТОЛЬКО готовыми Windows-сборками.
-; Флаг --only-binary=:all: ЗАПРЕЩАЕТ pip компилировать что-либо из исходников —
-; зависание на сборке Pillow невозможно в принципе: качается готовый .whl-файл.
-Filename: "{code:PythonExecutablePath}"; \
-  Parameters: "-m pip install --disable-pip-version-check --only-binary=:all: -r ""{app}\requirements.txt"""; \
+; ШАГ 2: библиотеки — только готовые Windows-сборки, флаг --user ставит их
+; в папку пользователя, поэтому не нужны права администратора
+Filename: "{code:PythonExe}"; \
+  Parameters: "-m pip install --disable-pip-version-check --user --only-binary=:all: -r ""{app}\requirements.txt"""; \
   StatusMsg: "Скачиваю библиотеки программы (готовые сборки, без компиляции)..."; \
   Flags: runhidden
 
-; ШАГ 3. Предложить запустить программу сразу после установки (галочка на финише)
-Filename: "{code:PythonWindowedExecutablePath}"; \
+; ШАГ 3: галочка "Запустить программу" на финише
+Filename: "{code:PythonWExe}"; \
   Parameters: """{app}\main.py"""; \
   WorkingDir: "{app}"; \
   Description: "{cm:LaunchProgram,{#MyAppName}}"; \
   Flags: nowait postinstall skipifsilent
 
-; --- Что удалять при удалении программы -----------------------------------------
-[UninstallDelete]
-; Убираем кэш с установщиком Python (освобождаем ~30 МБ на диске пользователя).
-; config.json с ключами НЕ трогаем — пользовательские данные остаются.
-Type: filesandordirs; Name: "{localappdata}\AI-Agent-Manager"
-
-; --- Русские тексты установщика --------------------------------------------------
+; --- Русские тексты мастера установки ---
 [Messages]
 WelcomeLabel2=Эта программа установит AI Agent Manager — центр управления нейросетями и роботом-помощником.%n%nУстановщик сам настроит Python и все библиотеки, если их нет. От вас — только нажимать «Далее».
-SelectTasksLabel2=Какие значки создать?%n%nРекомендуем оставить галочку рабочего стола.
-ReadyLabel2a=Проверьте настройки и нажмите «Установить».%n%nЕсли в системе нет Python 3.10+, установщик сам скачает его с python.org и поставит в фоне — понадобится интернет.
-FinishedHeadingLabel=Всё готово! 🎉
+ReadyLabel2a=Проверьте настройки и нажмите «Установить».%n%nЕсли в системе нет Python 3.10+, он будет установлен автоматически (файл уже внутри установщика, интернет нужен только для библиотек).
+FinishedHeadingLabel=Всё готово!
 FinishedLabelNoIcons=AI Agent Manager установлен.%n%nЗапустите его с ярлыка на рабочем столе.
 FinishedLabel=AI Agent Manager установлен.%n%nЗапустите его с ярлыка на рабочем столе.
 
@@ -127,124 +105,99 @@ AdditionalIcons=Дополнительные значки:
 LaunchProgram=Запустить %1
 
 ; ============================================================================
-;  КОД НА ЯЗЫКЕ PASCAL SCRIPT: умная проверка Python.
-;  ВАЖНО: внутри [Code] комментарии пишутся через // (это Pascal, а не INI).
+;  КОД НА PASCAL: ищем подходящий Python (в [Code] комментарии только //)
 ; ============================================================================
 [Code]
-// PythonSetupRequired = True, если нужно ставить наш Python (3.10+ не найден)
+// NeedPython — True, если свой Python надо ставить; FoundPython — путь к найденному
 var
-  PythonSetupRequired: Boolean;
-  SystemPythonExe: string;                             // найденный системный python.exe
+  NeedPython: Boolean;
+  FoundPython: string;
 
-const
-  PythonInstallerFileName = 'python-3.12.10-amd64.exe';
-
-// Папка-кэш, куда [Files] распакует установщик Python
-function CachedPythonDir(): string;
-begin
-  Result := ExpandConstant('{localappdata}') + '\AI-Agent-Manager\bootstrap';
-end;
-
-// Проверяем ОДИН python.exe: подходит, если версия >= 3.10 И есть pip.
-// Хитрость: заодно импортируем pip — так отсеивается урезанный python из
-// системной папки Windows (у него нет pip, библиотеки туда не поставить).
-// Коды выхода: 2 = подходит, 1 = слишком старый, прочее = не запустился.
-function IsElevatedPython(PythonExe: string): Boolean;
+// Проверяем один python.exe: файл существует и внутри есть pip (import pip = 0)
+function IsWorkingPython(const PythonExe: string): Boolean;
 var
   ResultCode: Integer;
 begin
   Result := False;
-  if not Exec(PythonExe,
-       '-c "import sys, pip; sys.exit(2 if sys.version_info >= (3, 10) else 1)"',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  if not FileExists(PythonExe) then
     Exit;
-  Result := (ResultCode = 2);
+  Result := Exec(PythonExe, '-c "import pip"', '',
+                 SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
 end;
 
-// Ищем python.exe ТОЛЬКО в системной папке C:\Windows (верхний уровень).
-// Такие папки создают только полноценные установки (реестр и PATH не нужны).
-function IsMatchingPythonFound(): Boolean;
+// Ищем Python в известных местах: наша прошлая установка и системные папки.
+// Имена папок уже гарантируют версии 3.10-3.12, поэтому проверяем только pip.
+function FindGoodPython(): string;
 var
-  WindowsDir: string;
-  FindRec: TFindRec;
-  CandidateExe: string;
+  Candidates: array of string;
+  I: Integer;
 begin
-  Result := False;
-  SystemPythonExe := '';
-  WindowsDir := ExpandConstant('{sd}') + '\Windows';
-  if not DirExists(WindowsDir) then
-    Exit;
-  if FindFirst(WindowsDir + '\*', FindRec) then
-  try
-    repeat
-      if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
-      begin
-        CandidateExe := WindowsDir + '\' + FindRec.Name + '\python.exe';
-        if FileExists(CandidateExe) and IsElevatedPython(CandidateExe) then
-        begin
-          SystemPythonExe := CandidateExe;             // запоминаем, что нашли
-          Result := True;
-          Exit;
-        end;
-      end;
-    until not FindNext(FindRec);
-  finally
-    FindClose(FindRec);
-  end;
-end;
-
-// Путь к python.exe: наш свежеустановленный или найденный системный
-function PythonExecutablePath(Param: string): string;
-begin
-  if PythonSetupRequired then
-    Result := CachedPythonDir() + '\Python312\python.exe'
-  else if SystemPythonExe <> '' then
-    Result := SystemPythonExe
-  else
-    Result := 'python.exe';
-end;
-
-// Путь к pythonw.exe (то же самое, но без окна консоли) — для ярлыков
-function PythonWindowedExecutablePath(Param: string): string;
-var
-  Base: string;
-begin
-  if PythonSetupRequired then
-    Result := CachedPythonDir() + '\Python312\pythonw.exe'
-  else
+  Result := '';
+  SetArrayLength(Candidates, 6);
+  // Наш Python из прошлой установки этой же программы
+  Candidates[0] := ExpandConstant('{localappdata}') + '\Programs\Python\Python312\python.exe';
+  Candidates[1] := ExpandConstant('{localappdata}') + '\Programs\Python\Python311\python.exe';
+  Candidates[2] := ExpandConstant('{localappdata}') + '\Programs\Python\Python310\python.exe';
+  // Системные установки (старый стиль установки "для всех пользователей")
+  Candidates[3] := ExpandConstant('{sd}') + '\Windows\Python312\python.exe';
+  Candidates[4] := ExpandConstant('{sd}') + '\Windows\Python311\python.exe';
+  Candidates[5] := ExpandConstant('{sd}') + '\Windows\Python310\python.exe';
+  for I := 0 to 5 do
   begin
-    if SystemPythonExe = '' then
-      Base := 'python.exe'
-    else
-      Base := SystemPythonExe;
-    StringChangeEx(Base, 'python.exe', 'pythonw.exe', True);
-    Result := Base;
+    if IsWorkingPython(Candidates[I]) then
+    begin
+      Result := Candidates[I];
+      Exit;
+    end;
   end;
 end;
 
-// Функция для Check: в [Run] — нужно ли устанавливать наш Python
-function PythonSetupRequiredCheck(Param: string): Boolean;
+// Заполняем переменные ДО начала установки (работает и для тихого режима)
+procedure DetectPython();
 begin
-  Result := PythonSetupRequired;
+  FoundPython := FindGoodPython();
+  NeedPython := (FoundPython = '');
 end;
 
-// Текст на странице "Готов к установке": честно говорим про Python
+// Страница "Готов к установке": решаем про Python и показываем это человеку
 function UpdateReadyMemo(Space, NewLine, MemoUserInfoInfo, MemoDirInfo, MemoTypeInfo, MemoComponentsInfo, MemoGroupInfo, MemoTasksInfo: string): string;
 begin
-  PythonSetupRequired := not IsMatchingPythonFound();  // решаем: ставим Python или нет
+  DetectPython();
   Result := MemoDirInfo + NewLine;
-  if PythonSetupRequired then
-    Result := Result + Space + 'Python 3.12 будет скачан с python.org и установлен автоматически (нужен интернет).' + NewLine
+  if NeedPython then
+    Result := Result + Space + 'Python 3.12 будет установлен автоматически (файл уже внутри установщика).' + NewLine
   else
-    Result := Result + Space + 'Подходящий Python уже есть в системе — устанавливать его не будем.' + NewLine;
+    Result := Result + Space + 'Подходящий Python уже есть в системе — ставить его не будем.' + NewLine;
   Result := Result + NewLine + Space + 'Библиотеки установятся из готовых сборок — быстро и без компиляции.' + NewLine;
   if MemoTasksInfo <> '' then
     Result := Result + NewLine + MemoTasksInfo;
 end;
 
-// Для тихой установки (/SILENT): страницы Ready нет, решаем перед копированием
+// Для тихой установки (/SILENT): страницы Ready нет, определяем перед копированием
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if CurStep = ssInstall then
-    PythonSetupRequired := not IsMatchingPythonFound();
+    DetectPython();
+end;
+
+// Проверка для [Run]: устанавливать ли наш Python
+function NeedInstallPython(Param: string): Boolean;
+begin
+  Result := NeedPython;
+end;
+
+// Путь к python.exe (наш свежий или найденный в системе)
+function PythonExe(Param: string): string;
+begin
+  if NeedPython then
+    Result := ExpandConstant('{localappdata}') + '\Programs\Python\Python312\python.exe'
+  else
+    Result := FoundPython;
+end;
+
+// Путь к pythonw.exe — тот же Python, но без окна консоли (для ярлыков)
+function PythonWExe(Param: string): string;
+begin
+  Result := PythonExe('');
+  StringChangeEx(Result, 'python.exe', 'pythonw.exe', True);
 end;

@@ -1,14 +1,14 @@
 # ============================================================================
 #  АВТОСБОРКА УСТАНОВЩИКА "AI AGENT MANAGER" НА GITHUB ACTIONS
 #  --------------------------------------------------------------------------
-#  Что происходит при пуше тега (например v1.0.0) или ручном запуске:
+#  Что происходит при пуше тега (например v1.2) или ручном запуске:
 #    1) GitHub включает виртуальный компьютер с Windows (windows-latest);
 #    2) ставит туда свежий Inno Setup 6 (в версии 6.6+ есть тёмная тема);
-#    3) компилирует наш agent_manager_setup.iss -> AI-Agent-Manager-Setup.exe
-#       (на этапе компиляции Inno сам скачает установщик Python с python.org
-#       и зашьёт его внутрь — это делает флаг DownloadKompatibelAndOverwrite);
+#    3) скачивает установщик Python 3.12.10 с python.org в папку bootstrap/
+#       и компилирует наш agent_manager_setup.iss -> AI-Agent-Manager-Setup.exe
+#       (Inno зашьёт файл Python внутрь установщика при компиляции);
 #    4) прикрепляет готовый файл к артефактам запуска (Artifacts);
-#    5) для тегов вида v1.0.0 — публикует файл в разделе Releases (Релизы).
+#    5) для тегов вида v1.2 — публикует файл в разделе Releases (Релизы).
 # ============================================================================
 
 # Имя сборочной линии — видно на вкладке "Actions"
@@ -18,7 +18,7 @@ name: Сборка установщика AI Agent Manager
 on:
   push:
     tags:
-      - 'v*'              # любой тег, начинающийся с "v" (v1.0.0, v2.5.1 и т.д.)
+      - 'v*'              # любой тег, начинающийся с "v" (v1.2, v2.0 и т.д.)
   workflow_dispatch:      # плюс кнопка "Run workflow" на вкладке Actions
 
 # Разрешение: релизы создаются от имени сборочной линии
@@ -42,6 +42,20 @@ jobs:
       - name: Ставим свежий Inno Setup 6 (6.6+ с тёмной темой)
         shell: pwsh
         run: choco install innosetup -y --no-progress
+
+      # Шаг 2.5. Скачиваем установщик Python 3.12.10 с python.org в папку
+      # bootstrap/ — наш .iss кладёт этот локальный файл ВНУТРИ установщика.
+      # Так компиляция не зависит от хрупких встроенных механизмов докачки.
+      - name: Скачиваем установщик Python 3.12.10 с python.org
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path bootstrap | Out-Null
+          $url = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe"
+          Invoke-WebRequest -Uri $url -OutFile "bootstrap\python-3.12.10-amd64.exe" `
+            -MaximumRetryCount 3 -RetryIntervalSec 5
+          $size = (Get-Item "bootstrap\python-3.12.10-amd64.exe").Length
+          if ($size -lt 20000000) { throw "Файл Python скачался не полностью: $size байт" }
+          Write-Host "Python installer OK: $size байт"
 
       # Шаг 3. Компилируем установщик.
       # ISCC.exe — консольный компилятор Inno Setup; он читает наш .iss
