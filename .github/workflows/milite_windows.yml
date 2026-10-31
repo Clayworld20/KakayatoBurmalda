@@ -1,0 +1,43 @@
+name: 'MiLite TV: APK и установщик Windows'
+on:
+  push:
+    paths: ['android-launcher/**', '.github/workflows/milite_windows.yml']
+  pull_request:
+    paths: ['android-launcher/**', '.github/workflows/milite_windows.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows-bundle:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: android-launcher
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Build APK and run Android Lint
+        shell: pwsh
+        run: |
+          ./gradlew.bat --no-daemon :app:assembleDebug :app:lintDebug
+          if ($LASTEXITCODE -ne 0) { throw 'Android build failed' }
+      - name: Test installer logic
+        shell: pwsh
+        run: |
+          $csc = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          & $csc /nologo /target:exe /langversion:5 /out:InstallerTests.exe /reference:System.Core.dll windows-installer/InstallerCore.cs windows-installer/InstallerTests.cs
+          if ($LASTEXITCODE -ne 0) { throw 'Test compilation failed' }
+          ./InstallerTests.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Installer tests failed' }
+      - name: Package Windows installer
+        shell: pwsh
+        run: ./windows-installer/build.ps1 -ApkPath app/build/outputs/apk/debug/app-debug.apk -AdbDirectory "$env:ANDROID_HOME\platform-tools"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MiLite-TV-Windows
+          path: android-launcher/windows-installer/out/MiLite-TV-Windows.zip
+          if-no-files-found: error
